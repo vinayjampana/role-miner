@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RoleMiner — Product Scope</title>
+<style>
+  :root {
+    --bg:         #0d1117;
+    --bg2:        #161b22;
+    --bg3:        #1c2128;
+    --border:     #30363d;
+    --text:       #e6edf3;
+    --muted:      #7d8590;
+    --green:      #3fb950;
+    --green-dim:  #1a3a22;
+    --blue:       #58a6ff;
+    --blue-dim:   #0d2040;
+    --purple:     #a371f7;
+    --purple-dim: #1e1435;
+    --yellow:     #d29922;
+    --yellow-dim: #2a1f00;
+    --red:        #f85149;
+    --red-dim:    #2a1010;
+    --orange:     #e3b341;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  .page { max-width: 1060px; margin: 0 auto; padding: 48px 32px 80px; }
+
+  /* Header */
+  .header { border-bottom: 1px solid var(--border); padding-bottom: 32px; margin-bottom: 48px; }
+  .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--blue); margin-bottom: 10px; }
+  .header h1 { font-size: 38px; font-weight: 800; letter-spacing: -0.03em; color: #fff; margin-bottom: 6px; }
+  .header h1 span { color: var(--blue); }
+  .tagline { font-size: 17px; color: var(--muted); max-width: 560px; margin-bottom: 20px; }
+  .badges { display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; border: 1px solid; }
+  .b-green  { background: var(--green-dim);  border-color: var(--green);  color: var(--green); }
+  .b-blue   { background: var(--blue-dim);   border-color: var(--blue);   color: var(--blue); }
+  .b-yellow { background: var(--yellow-dim); border-color: var(--yellow); color: var(--yellow); }
+  .b-purple { background: var(--purple-dim); border-color: var(--purple); color: var(--purple); }
+
+  /* TOC */
+  .toc { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin-bottom: 48px; }
+  .toc-title { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+  .toc-list { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; }
+  .toc-list a { color: var(--blue); text-decoration: none; font-size: 13.5px; }
+  .toc-list a:hover { text-decoration: underline; }
+
+  /* Sections */
+  section { margin-bottom: 60px; }
+  .sec-label { font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
+  h2 { font-size: 22px; font-weight: 700; color: #fff; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+  .icon { width: 30px; height: 30px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+  h3 { font-size: 14px; font-weight: 600; color: var(--text); margin: 18px 0 8px; }
+
+  /* Cards */
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 22px 26px; margin-bottom: 12px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  @media(max-width:768px) { .grid2,.grid3 { grid-template-columns: 1fr; } }
+
+  /* Problem */
+  .problem { background: var(--blue-dim); border: 1px solid var(--blue); border-radius: 10px; padding: 26px 30px; }
+  .problem p { color: var(--text); line-height: 1.75; font-size: 15px; }
+
+  /* How it works steps */
+  .steps { display: flex; flex-direction: column; gap: 0; }
+  .step { display: flex; gap: 20px; padding: 18px 0; border-bottom: 1px solid var(--border); }
+  .step:last-child { border-bottom: none; }
+  .step-num { width: 32px; height: 32px; border-radius: 50%; background: var(--blue-dim); border: 1.5px solid var(--blue); color: var(--blue); font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px; }
+  .step-content h4 { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  .step-content p { font-size: 13.5px; color: var(--muted); line-height: 1.55; }
+  .step-content code { font-family: monospace; font-size: 12px; color: var(--blue); background: var(--blue-dim); padding: 1px 6px; border-radius: 4px; }
+
+  /* Input blocks */
+  .input-block { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+  .input-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg2); }
+  .input-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+  .input-body { padding: 16px; }
+  pre { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12.5px; line-height: 1.65; color: #adbac7; overflow-x: auto; }
+  .cm { color: var(--muted); }
+  .ck { color: var(--purple); }
+  .cs { color: var(--green); }
+  .cn { color: var(--blue); }
+
+  /* UI features */
+  .feature-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .feature-icon { font-size: 22px; margin-bottom: 10px; }
+  .feature-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+  .feature-desc { font-size: 13px; color: var(--muted); line-height: 1.55; }
+
+  /* Callout */
+  .callout { display: flex; gap: 14px; padding: 16px 20px; border-radius: 8px; margin-top: 14px; font-size: 13.5px; line-height: 1.6; }
+  .callout.green  { background: var(--green-dim);  border: 1px solid var(--green); }
+  .callout.blue   { background: var(--blue-dim);   border: 1px solid var(--blue); }
+  .callout.yellow { background: var(--yellow-dim); border: 1px solid var(--yellow); }
+  .callout-icon { font-size: 16px; flex-shrink: 0; margin-top: 2px; }
+
+  /* Sources table */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  thead th { text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); }
+  tbody td { padding: 11px 14px; border-bottom: 1px solid var(--border); color: var(--text); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: var(--bg3); }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .p-green  { background: var(--green-dim);  color: var(--green); }
+  .p-blue   { background: var(--blue-dim);   color: var(--blue); }
+  .p-yellow { background: var(--yellow-dim); color: var(--yellow); }
+  .p-orange { background: #2a1800;           color: var(--orange); }
+
+  /* Output card */
+  .output-example { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .output-header { background: var(--bg2); padding: 12px 18px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .job-card { padding: 16px 18px; border-bottom: 1px solid var(--border); }
+  .job-card:last-child { border-bottom: none; }
+  .job-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+  .job-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .score-badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 700; }
+  .score-high   { background: var(--green-dim); color: var(--green); border: 1px solid var(--green); }
+  .score-mid    { background: var(--blue-dim);  color: var(--blue);  border: 1px solid var(--blue); }
+  .job-meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .job-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; background: var(--bg); border: 1px solid var(--border); color: var(--muted); }
+  .tag.match { border-color: var(--green); color: var(--green); background: var(--green-dim); }
+  .tag.gap    { border-color: var(--yellow); color: var(--yellow); background: var(--yellow-dim); }
+
+  hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+  .footer { text-align: center; padding: 32px 0; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="eyebrow">Product Scope · v1.0 · India</div>
+    <h1>Role<span>Miner</span></h1>
+    <p class="tagline">Stop hunting jobs manually. RoleMiner scans India's top job portals, scores every opening against your profile, and delivers a ranked shortlist — daily.</p>
+    <div class="badges">
+      <span class="badge b-green">India-first</span>
+      <span class="badge b-blue">AI-powered scoring</span>
+      <span class="badge b-yellow">8+ job sources</span>
+      <span class="badge b-purple">Senior · Senior+ roles</span>
+    </div>
+  </div>
+
+  <!-- TOC -->
+  <div class="toc">
+    <div class="toc-title">Contents</div>
+    <ul class="toc-list">
+      <li><a href="#problem">1. Problem</a></li>
+      <li><a href="#howitworks">2. How it works</a></li>
+      <li><a href="#inputs">3. What you provide</a></li>
+      <li><a href="#output">4. What you get</a></li>
+      <li><a href="#sources">5. Job sources</a></li>
+      <li><a href="#ui">6. Dashboard features</a></li>
+      <li><a href="#india">7. India-specific</a></li>
+      <li><a href="#notscope">8. Out of scope</a></li>
+    </ul>
+  </div>
+
+  <!-- 1. Problem -->
+  <section id="problem">
+    <div class="sec-label">01</div>
+    <h2><span class="icon" style="background:#0d2040">🎯</span> Problem</h2>
+    <div class="problem">
+      <p>
+        Finding relevant senior tech jobs in India means manually checking Naukri, Cutshort, Wellfound, iimjobs, Greenhouse boards, company career pages — every day.
+        Each site has different filters, different freshness, and 90% noise.
+        You spend 2–3 hours a week just finding jobs worth reading, before you even evaluate fit.
+        <br><br>
+        Most job boards show you what's popular, not what matches <em>your</em> specific profile —
+        your stack, your seniority, your salary floor, your preference for product companies over service firms.
+        <br><br>
+        RoleMiner automates the entire discovery layer. You provide your resume and preferences once.
+        Every run returns a shortlist of scored, ranked roles — with an explanation of why each fits or doesn't.
+      </p>
+    </div>
+  </section>
+
+  <!-- 2. How it works -->
+  <section id="howitworks">
+    <div class="sec-label">02</div>
+    <h2><span class="icon" style="background:#1a3a22">⚡</span> How It Works</h2>
+    <div class="card">
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <h4>You provide resume + preferences</h4>
+            <p>Drop your resume PDF and fill a simple YAML file with what you're looking for — domains, stack, location, salary floor, company type. One-time setup.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <h4>RoleMiner discovers relevant companies</h4>
+            <p>First run builds a company registry — finds companies matching your preferences across all sources. This runs once and updates incrementally.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <h4>Fresh jobs fetched from all sources</h4>
+            <p>Every run pulls jobs posted in the last 7 days from 8+ sources in parallel — ATS APIs, job portals, career pages. No stale listings.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <h4>AI scores each job against your profile</h4>
+            <p>An LLM reads your resume and each job description, scores fit 0–10, identifies skill matches and gaps, and writes a one-line reason.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">5</div>
+          <div class="step-content">
+            <h4>Dashboard shows ranked shortlist</h4>
+            <p>Open the web app — see scored job cards, filter by location/score/company type, search semantically, compare jobs, view skill gap breakdown per role.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="callout green">
+      <span class="callout-icon">⏱️</span>
+      <span>Total time per run: ~3–5 minutes. Time you save: 2–3 hours/week of manual searching.</span>
+    </div>
+  </section>
+
+  <!-- 3. Inputs -->
+  <section id="inputs">
+    <div class="sec-label">03</div>
+    <h2><span class="icon" style="background:#1e1435">📥</span> What You Provide</h2>
+
+    <p style="color:var(--muted); margin-bottom:20px; font-size:14px">Two files. That's all RoleMiner needs to start.</p>
+
+    <!-- Input 1: Resume -->
+    <div class="input-block">
+      <div class="input-header">
+        <span style="font-size:18px">📄</span>
+        <span class="input-label" style="color:var(--blue)">Input 1 — Your Resume</span>
+        <span class="badge b-blue" style="margin-left:auto">PDF</span>
+      </div>
+      <div class="input-body">
+        <p style="font-size:13.5px; color:var(--muted); margin-bottom:10px">
+          Drop your existing resume PDF. RoleMiner extracts your skills, experience, education, and contact details automatically.
+          No reformatting needed — it works with any resume layout.
+        </p>
+        <p style="font-size:12px; color:var(--muted)">
+          Extracted fields used for scoring: current title · years of experience · tech stack · companies worked at · education · location
+        </p>
+      </div>
+    </div>
+
+    <!-- Input 2: Search Profile -->
+    <div class="input-block">
+      <div class="input-header">
+        <span style="font-size:18px">⚙️</span>
+        <span class="input-label" style="color:var(--green)">Input 2 — Search Preferences</span>
+        <span class="badge b-green" style="margin-left:auto">YAML file</span>
+      </div>
+      <div class="input-body">
+        <p style="font-size:13.5px; color:var(--muted); margin-bottom:14px">
+          Fill this once. Edit anytime to change what you're looking for.
+        </p>
+        <pre><span class="cm"># search_profile.yaml — edit this to define your job search</span>
+
+<span class="cm"># What kind of roles</span>
+<span class="ck">domains</span>:
+  - <span class="cs">frontend</span>
+  - <span class="cs">fullstack</span>
+
+<span class="ck">keywords</span>:                    <span class="cm"># job titles or role types you want</span>
+  - <span class="cs">"senior frontend engineer"</span>
+  - <span class="cs">"founding engineer"</span>
+  - <span class="cs">"staff engineer"</span>
+
+<span class="cm"># Your tech stack</span>
+<span class="ck">stack</span>:
+  - <span class="cs">React</span>
+  - <span class="cs">TypeScript</span>
+  - <span class="cs">Node.js</span>
+
+<span class="cm"># Location</span>
+<span class="ck">locations</span>:
+  - <span class="cs">Bangalore</span>
+  - <span class="cs">Remote</span>
+  - <span class="cs">Hyderabad</span>
+<span class="ck">work_mode</span>:                   <span class="cm"># remote | hybrid | onsite</span>
+  - <span class="cs">remote</span>
+  - <span class="cs">hybrid</span>
+
+<span class="cm"># Salary</span>
+<span class="ck">salary_min_lpa</span>: <span class="cn">30</span>           <span class="cm"># ₹ Lakhs Per Annum — filters out below-threshold roles</span>
+
+<span class="cm"># Company preferences</span>
+<span class="ck">company_types</span>:
+  - <span class="cs">product</span>                  <span class="cm"># product | startup | enterprise</span>
+  - <span class="cs">startup</span>
+<span class="ck">exclude_service_companies</span>: <span class="cn">true</span>   <span class="cm"># filters TCS/Infosys/Wipro/Accenture type</span>
+<span class="ck">preferred_funding_stages</span>:  <span class="cm"># leave empty to include all</span>
+  - <span class="cs">Series B</span>
+  - <span class="cs">Series C</span>
+  - <span class="cs">Series D</span>
+  - <span class="cs">Public</span>
+
+<span class="cm"># Your situation</span>
+<span class="ck">notice_period_days</span>: <span class="cn">30</span>        <span class="cm"># 0 | 30 | 60 | 90 — affects urgency scoring</span>
+<span class="ck">esop_preferred</span>: <span class="cn">true</span>          <span class="cm"># flags roles that mention equity/ESOP</span>
+
+<span class="cm"># Explicitly block these companies</span>
+<span class="ck">exclude_companies</span>:
+  - <span class="cs">TCS</span>
+  - <span class="cs">Infosys</span>
+  - <span class="cs">Wipro</span>
+  - <span class="cs">Cognizant</span>
+  - <span class="cs">HCL</span></pre>
+      </div>
+    </div>
+
+    <div class="callout blue">
+      <span class="callout-icon">ℹ️</span>
+      <span>Nothing else needed. RoleMiner reads these two files and does the rest — company discovery, scraping, scoring, ranking.</span>
+    </div>
+  </section>
+
+  <!-- 4. Output -->
+  <section id="output">
+    <div class="sec-label">04</div>
+    <h2><span class="icon" style="background:#1a3a22">📤</span> What You Get</h2>
+
+    <p style="color:var(--muted); margin-bottom:18px; font-size:14px">Every run produces a scored job list. Here's what each result looks like:</p>
+
+    <div class="output-example">
+      <div class="output-header">
+        <span class="dot" style="background:#f85149"></span>
+        <span class="dot" style="background:#d29922"></span>
+        <span class="dot" style="background:#3fb950"></span>
+        <span style="margin-left:8px">RoleMiner Dashboard — Last run: 47 jobs found · 12 strong matches</span>
+      </div>
+
+      <div class="job-card">
+        <div class="job-top">
+          <div>
+            <div class="job-title">Senior Frontend Engineer</div>
+            <div class="job-meta">Sarvam AI · Bangalore · ₹35–50 LPA · Posted 2 days ago · Greenhouse</div>
+          </div>
+          <span class="score-badge score-high">9 / 10</span>
+        </div>
+        <p style="font-size:12.5px; color:var(--muted); margin-bottom:8px">"Strong match — React + TypeScript core stack, LLM tooling exposure aligns with your side projects, Bangalore-based."</p>
+        <div class="job-tags">
+          <span class="tag match">React ✓</span>
+          <span class="tag match">TypeScript ✓</span>
+          <span class="tag match">LLM tooling ✓</span>
+          <span class="tag gap">Rust — gap</span>
+          <span class="tag">Series B</span>
+          <span class="tag">ESOP</span>
+          <span class="tag">Immediate joiner preferred</span>
+        </div>
+      </div>
+
+      <div class="job-card">
+        <div class="job-top">
+          <div>
+            <div class="job-title">Staff Engineer — Frontend Platform</div>
+            <div class="job-meta">Razorpay · Remote · ₹40–60 LPA · Posted 5 days ago · Lever</div>
+          </div>
+          <span class="score-badge score-high">8 / 10</span>
+        </div>
+        <p style="font-size:12.5px; color:var(--muted); margin-bottom:8px">"Good match — platform engineering scope, your design systems work directly relevant. Notice period may be a concern."</p>
+        <div class="job-tags">
+          <span class="tag match">React ✓</span>
+          <span class="tag match">Design Systems ✓</span>
+          <span class="tag match">Performance ✓</span>
+          <span class="tag gap">Go — gap</span>
+          <span class="tag">Public</span>
+          <span class="tag">ESOP</span>
+          <span class="tag">30-day notice OK</span>
+        </div>
+      </div>
+
+      <div class="job-card">
+        <div class="job-top">
+          <div>
+            <div class="job-title">Founding Engineer</div>
+            <div class="job-meta">Stealth AI Startup · Remote · ₹30–45 LPA · Posted 1 day ago · Cutshort</div>
+          </div>
+          <span class="score-badge score-mid">7 / 10</span>
+        </div>
+        <p style="font-size:12.5px; color:var(--muted); margin-bottom:8px">"Decent fit — full ownership, early stage. Stack partially overlaps. Salary at your floor."</p>
+        <div class="job-tags">
+          <span class="tag match">React ✓</span>
+          <span class="tag match">Node.js ✓</span>
+          <span class="tag gap">AWS — gap</span>
+          <span class="tag">Seed</span>
+          <span class="tag">ESOP — significant</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>Per job, you always see:</h3>
+    <div class="grid2" style="margin-top:10px">
+      <div class="card" style="margin:0">
+        <ul style="list-style:none; font-size:13.5px; display:flex; flex-direction:column; gap:8px">
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> Match score 0–10 with reason</li>
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> Skills you have that match</li>
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> Skills the job needs that you lack</li>
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> Salary range (when listed)</li>
+        </ul>
+      </div>
+      <div class="card" style="margin:0">
+        <ul style="list-style:none; font-size:13.5px; display:flex; flex-direction:column; gap:8px">
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> Company funding stage</li>
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> ESOP / equity flag</li>
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> Notice period compatibility</li>
+          <li style="display:flex; gap:8px"><span style="color:var(--green)">✓</span> Source + date posted + direct link</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. Sources -->
+  <section id="sources">
+    <div class="sec-label">05</div>
+    <h2><span class="icon" style="background:#1e1435">🔍</span> Job Sources</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Source</th><th>Coverage</th><th>Type</th><th>Risk</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Greenhouse</strong></td>
+            <td style="color:var(--muted)">Global funded startups, most Indian unicorns</td>
+            <td style="color:var(--muted)">Public API</td>
+            <td><span class="pill p-green">Zero</span></td>
+          </tr>
+          <tr>
+            <td><strong>Lever</strong></td>
+            <td style="color:var(--muted)">Product companies, Series B+</td>
+            <td style="color:var(--muted)">Public API</td>
+            <td><span class="pill p-green">Zero</span></td>
+          </tr>
+          <tr>
+            <td><strong>Ashby</strong></td>
+            <td style="color:var(--muted)">AI-first startups, newer tech companies</td>
+            <td style="color:var(--muted)">Public API</td>
+            <td><span class="pill p-green">Zero</span></td>
+          </tr>
+          <tr>
+            <td><strong>Cutshort</strong></td>
+            <td style="color:var(--muted)">India startup jobs — strongest India startup signal</td>
+            <td style="color:var(--muted)">Public API</td>
+            <td><span class="pill p-green">Zero</span></td>
+          </tr>
+          <tr>
+            <td><strong>Wellfound</strong></td>
+            <td style="color:var(--muted)">Global + India startups, remote-friendly roles</td>
+            <td style="color:var(--muted)">GraphQL</td>
+            <td><span class="pill p-blue">Low</span></td>
+          </tr>
+          <tr>
+            <td><strong>YC Work at a Startup</strong></td>
+            <td style="color:var(--muted)">YC portfolio companies — India offices + remote</td>
+            <td style="color:var(--muted)">HTTP scrape</td>
+            <td><span class="pill p-blue">Low</span></td>
+          </tr>
+          <tr>
+            <td><strong>iimjobs</strong></td>
+            <td style="color:var(--muted)">Senior/leadership roles India — unique signal</td>
+            <td style="color:var(--muted)">HTTP scrape</td>
+            <td><span class="pill p-blue">Low</span></td>
+          </tr>
+          <tr>
+            <td><strong>Workday</strong></td>
+            <td style="color:var(--muted)">Enterprise + large tech India offices</td>
+            <td style="color:var(--muted)">Unofficial API</td>
+            <td><span class="pill p-blue">Low</span></td>
+          </tr>
+          <tr>
+            <td><strong>Naukri</strong></td>
+            <td style="color:var(--muted)">Broadest India market coverage</td>
+            <td style="color:var(--muted)">Browser + stealth</td>
+            <td><span class="pill p-orange">Medium</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout yellow">
+      <span class="callout-icon">ℹ️</span>
+      <span>LinkedIn excluded — ban risk too high on real accounts. The 8 sources above cover the relevant India tech job market comprehensively.</span>
+    </div>
+  </section>
+
+  <!-- 6. UI Features -->
+  <section id="ui">
+    <div class="sec-label">06</div>
+    <h2><span class="icon" style="background:#1a3a22">🖥️</span> Dashboard Features</h2>
+
+    <div class="grid3">
+      <div class="feature-card">
+        <div class="feature-icon">📡</div>
+        <div class="feature-title">Live Scrape Progress</div>
+        <div class="feature-desc">Hit "Find Jobs" and watch each source light up in real time as jobs stream in. No waiting on a spinner.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔎</div>
+        <div class="feature-title">Semantic Search</div>
+        <div class="feature-desc">Type naturally — "founding engineer Bangalore React" or "remote AI startup senior" — and get semantically matched results.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🎯</div>
+        <div class="feature-title">Score + Skill Gap</div>
+        <div class="feature-desc">Every job shows a 0–10 fit score, which of your skills match, and what's missing. Know before you apply.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <div class="feature-title">Skill Radar Chart</div>
+        <div class="feature-desc">Open any job to see a visual radar: your skills vs what the role requires. Instantly shows alignment and gaps.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⚖️</div>
+        <div class="feature-title">Job Comparison</div>
+        <div class="feature-desc">Select 2–3 jobs and compare them side-by-side — salary, stack, score, company stage, notice period compatibility.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📈</div>
+        <div class="feature-title">Skill Trend Tracker</div>
+        <div class="feature-desc">See which skills are appearing more in JDs week over week. Know what the India market is moving toward.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🗺️</div>
+        <div class="feature-title">Job Cluster View</div>
+        <div class="feature-desc">2D scatter plot of all jobs grouped by domain and seniority. Spot clusters — see where demand is concentrated.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔧</div>
+        <div class="feature-title">Filter Stack</div>
+        <div class="feature-desc">Filter by score threshold, location, company type, funding stage, ESOP flag, work mode, date posted.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">💰</div>
+        <div class="feature-title">Run Cost Dashboard</div>
+        <div class="feature-desc">See tokens used and cost per run. Each run costs &lt; ₹0.20. Full transparency on API spend.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. India-specific -->
+  <section id="india">
+    <div class="sec-label">07</div>
+    <h2><span class="icon" style="background:#2a1f00">🇮🇳</span> India-Specific</h2>
+
+    <div class="grid2">
+      <div class="card">
+        <h3 style="margin-top:0; color:var(--yellow)">Product vs Service Filter</h3>
+        <p style="font-size:13.5px; color:var(--muted); line-height:1.6">
+          RoleMiner classifies every company as product or service. Set <code style="color:var(--blue)">exclude_service_companies: true</code> to never see TCS/Infosys/Wipro/Cognizant-type roles. This is automatic — you don't have to maintain a blocklist.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0; color:var(--yellow)">LPA Salary Handling</h3>
+        <p style="font-size:13.5px; color:var(--muted); line-height:1.6">
+          All salaries normalised to ₹ LPA. Set your floor once in the profile. Jobs below threshold are filtered before scoring — you never see them.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0; color:var(--yellow)">Notice Period Awareness</h3>
+        <p style="font-size:13.5px; color:var(--muted); line-height:1.6">
+          Declare your notice period (0/30/60/90 days). Jobs that say "immediate joiner only" get flagged when your notice doesn't match. Score is adjusted accordingly.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0; color:var(--yellow)">ESOP Detection</h3>
+        <p style="font-size:13.5px; color:var(--muted); line-height:1.6">
+          RoleMiner detects ESOP / equity mentions in JDs and flags them. If <code style="color:var(--blue)">esop_preferred: true</code>, these rank higher in scoring.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0; color:var(--yellow)">Funding Stage Signal</h3>
+        <p style="font-size:13.5px; color:var(--muted); line-height:1.6">
+          Company funding stage (Seed / Series A–D / Public) shown on every card. Filter by stage. Prefer Series B+ for stability, Seed for outsized upside.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0; color:var(--yellow)">Work Mode Clarity</h3>
+        <p style="font-size:13.5px; color:var(--muted); line-height:1.6">
+          "Remote" in India often means hybrid. RoleMiner extracts actual work mode from JD text — WFH / WFO / hybrid — not just what the job title says.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. Out of scope -->
+  <section id="notscope">
+    <div class="sec-label">08</div>
+    <h2><span class="icon" style="background:#2a1010">🚫</span> Out of Scope</h2>
+    <div class="card">
+      <ul style="list-style:none; display:flex; flex-direction:column; gap:10px">
+        <li style="display:flex; gap:10px; font-size:13.5px"><span style="color:var(--red)">✗</span> <span><strong>Submitting applications</strong> — RoleMiner finds and scores jobs. Applying is a separate step (handled by JobPilot apply agent).</span></li>
+        <li style="display:flex; gap:10px; font-size:13.5px"><span style="color:var(--red)">✗</span> <span><strong>LinkedIn scraping</strong> — ban risk too high. Excluded entirely.</span></li>
+        <li style="display:flex; gap:10px; font-size:13.5px"><span style="color:var(--red)">✗</span> <span><strong>Resume generation</strong> — out of scope for this tool (handled by JobPilot resume agent).</span></li>
+        <li style="display:flex; gap:10px; font-size:13.5px"><span style="color:var(--red)">✗</span> <span><strong>Recruiter outreach</strong> — RoleMiner surfaces jobs, not recruiters or hiring managers.</span></li>
+        <li style="display:flex; gap:10px; font-size:13.5px"><span style="color:var(--red)">✗</span> <span><strong>Global jobs</strong> — India-first. Remote roles included but non-India international roles deprioritised.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <div class="footer">
+    RoleMiner · Product Scope v1.0 · India-first job discovery · Built for senior tech roles
+  </div>
+
+</div>
+</body>
+</html>
