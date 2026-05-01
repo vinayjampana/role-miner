@@ -1,0 +1,31 @@
+skills:
+  - React
+  - TypeScript
+  - Node.js
+  - Python
+  - GraphQL
+
+locations:
+  - Bangalore
+  - Hyderabad
+  - Mumbai
+  - NCR
+  - Remote
+
+salary_min_lpa: 30
+
+work_mode:
+  - remote
+  - hybrid
+
+company_type:
+  - product
+
+exclude_companies: []
+
+notice_days: 60
+
+resume_summary: |
+  Senior full-stack engineer with 8+ years experience.
+  Strong in React, TypeScript, Node.js, Python.
+  Prefers product companies with ESOP, Series A-C preferred.
