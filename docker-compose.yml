@@ -6,7 +6,7 @@ services:
     volumes:
       - ./output:/app/output
       - ./roleminer/registry:/app/roleminer/registry
-      - ./search_profile.yaml:/app/search_profile.yaml:ro
+      - ./search_profile.yaml:/app/search_profile.yaml
     env_file:
       - .env
     restart: unless-stopped

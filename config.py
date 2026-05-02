@@ -29,3 +29,25 @@ DISCOVER_MODEL = os.getenv("DISCOVER_MODEL", "tencent/hy3-preview:free")
 EMBED_API_KEY = os.getenv("EMBED_API_KEY", os.getenv("LLM_API_KEY", ""))
 EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "https://openrouter.ai/api/v1")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2:free")
+
+
+def sync_from_environ() -> None:
+    """
+    Refresh module-level settings from os.environ.
+    Call after updating the process environment (e.g. merged .env from the API)
+    so the running server and pipeline see new keys without a restart.
+    """
+    import sys
+
+    m = sys.modules[__name__]
+    m.LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+    m.LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
+    m.SCORING_MODEL = os.getenv("SCORING_MODEL", "gemini-3-flash")
+    m.PROXY_URL = os.getenv("PROXY_URL", "")
+    m.SCRAPER_FRESHNESS_HOURS = int(os.getenv("SCRAPER_FRESHNESS_HOURS", "24"))
+    m.BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "")
+    m.DISCOVER_MODEL = os.getenv("DISCOVER_MODEL", "tencent/hy3-preview:free")
+    _lk = os.getenv("LLM_API_KEY", "")
+    m.EMBED_API_KEY = os.getenv("EMBED_API_KEY", _lk)
+    m.EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "https://openrouter.ai/api/v1")
+    m.EMBED_MODEL = os.getenv("EMBED_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2:free")

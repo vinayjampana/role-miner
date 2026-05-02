@@ -77,6 +77,51 @@ const j = async <T>(p: Promise<Response>): Promise<T> => {
   return r.json();
 };
 
+export interface SearchProfile {
+  skills: string[];
+  locations: string[];
+  salary_min_lpa: number;
+  work_mode: string[];
+  company_type: string[];
+  exclude_companies: string[];
+  notice_days: number;
+  resume_summary: string;
+}
+
+export interface RuntimeSettings {
+  llm_base_url: string;
+  scoring_model: string;
+  discover_model: string;
+  embed_base_url: string;
+  embed_model: string;
+  scraper_freshness_hours: number;
+  proxy_url: string;
+  llm_api_key_set: boolean;
+  llm_api_key_hint: string;
+  embed_api_key_set: boolean;
+  embed_api_key_hint: string;
+  brave_search_api_key_set: boolean;
+  brave_search_api_key_hint: string;
+}
+
+export interface RuntimeSettingsPatch {
+  llm_api_key?: string;
+  llm_base_url?: string;
+  scoring_model?: string;
+  discover_model?: string;
+  embed_api_key?: string;
+  embed_base_url?: string;
+  embed_model?: string;
+  brave_search_api_key?: string;
+  scraper_freshness_hours?: number;
+  proxy_url?: string;
+}
+
+export interface ResumeInfo {
+  has_pdf: boolean;
+  path: string;
+}
+
 export const api = {
   latestJobs: () => j<Job[]>(fetch("/api/jobs/latest")),
   jobsForRun: (id: number) => j<Job[]>(fetch(`/api/jobs/run/${id}`)),
@@ -85,6 +130,29 @@ export const api = {
   trigger: () => j<{ run_id: number }>(fetch("/api/trigger", { method: "POST" })),
   stats: () => j<any>(fetch("/api/stats")),
   companies: () => j<Company[]>(fetch("/api/companies")),
+
+  getProfile: () => j<SearchProfile>(fetch("/api/profile")),
+  putProfile: (body: SearchProfile) =>
+    j<SearchProfile>(fetch("/api/profile", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })),
+  getRuntimeSettings: () => j<RuntimeSettings>(fetch("/api/settings")),
+  patchRuntimeSettings: (patch: RuntimeSettingsPatch) =>
+    j<RuntimeSettings>(fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    })),
+  getResumeInfo: () => j<ResumeInfo>(fetch("/api/profile/resume")),
+  uploadResume: async (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await fetch("/api/profile/resume", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json() as Promise<{ ok: boolean; path: string; bytes: number }>;
+  },
 
   discoverCompanies: (names: string[], onResult: (r: DiscoverResult) => void): Promise<void> => {
     return new Promise(async (resolve, reject) => {

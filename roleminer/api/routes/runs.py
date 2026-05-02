@@ -47,6 +47,13 @@ async def _run_in_background(run_id: int, queue: asyncio.Queue) -> None:
     started = time.time()
     try:
         profile = _load_profile()
+        logger.info(
+            "Run %d: loaded profile from %s (skills=%d resume_summary_chars=%d)",
+            run_id,
+            config.SEARCH_PROFILE,
+            len(profile.get("skills") or []),
+            len((profile.get("resume_summary") or "").strip()),
+        )
         await run_pipeline(conn, profile, run_id, event_queue=queue)
     except Exception as exc:
         # run_pipeline updates status itself before re-raising; this is a safety net

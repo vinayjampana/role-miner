@@ -1,6 +1,6 @@
 """Pydantic response models for the RoleMiner API."""
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class JobOut(BaseModel):
@@ -73,6 +73,59 @@ class DiscoverResult(BaseModel):
     method: str  # cache | heuristic | search | llm | failed
     already_in_db: bool = False
     company_id: int | None = None
+
+
+class SearchProfileOut(BaseModel):
+    """Structured search_profile.yaml — mirrors pipeline expectations."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    skills: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    salary_min_lpa: int = 0
+    work_mode: list[str] = Field(default_factory=list)
+    company_type: list[str] = Field(default_factory=list)
+    exclude_companies: list[str] = Field(default_factory=list)
+    notice_days: int = 0
+    resume_summary: str = ""
+
+
+class RuntimeSettingsOut(BaseModel):
+    """Non-secret LLM / infra settings + masked secret hints."""
+
+    llm_base_url: str = ""
+    scoring_model: str = ""
+    discover_model: str = ""
+    embed_base_url: str = ""
+    embed_model: str = ""
+    scraper_freshness_hours: int = 24
+    proxy_url: str = ""
+    llm_api_key_set: bool = False
+    llm_api_key_hint: str = ""
+    embed_api_key_set: bool = False
+    embed_api_key_hint: str = ""
+    brave_search_api_key_set: bool = False
+    brave_search_api_key_hint: str = ""
+
+
+class RuntimeSettingsUpdate(BaseModel):
+    """Partial update: only fields present in the JSON body are written to .env."""
+
+    llm_api_key: str | None = None
+    llm_base_url: str | None = None
+    scoring_model: str | None = None
+    discover_model: str | None = None
+    embed_api_key: str | None = None
+    embed_base_url: str | None = None
+    embed_model: str | None = None
+    brave_search_api_key: str | None = None
+    scraper_freshness_hours: int | None = None
+    proxy_url: str | None = None
+
+
+class ResumeInfoOut(BaseModel):
+    has_pdf: bool
+    path: str
 
 
 class CompanyOut(BaseModel):

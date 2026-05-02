@@ -22,6 +22,12 @@ def _get_client() -> OpenAI:
     return _client
 
 
+def reset_client() -> None:
+    """Drop cached OpenAI client so the next embed uses fresh config (e.g. new API key)."""
+    global _client
+    _client = None
+
+
 def embed(texts: list[str], input_type: Literal["query", "passage"] = "passage") -> list[list[float]]:
     """Return embeddings for texts. input_type='query' for profile, 'passage' for docs."""
     if not texts:

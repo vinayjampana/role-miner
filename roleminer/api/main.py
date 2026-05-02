@@ -8,7 +8,7 @@ import logging
 
 import config
 from roleminer.registry.db import init_db, cleanup_stale_runs
-from roleminer.api.routes import companies, jobs, runs, stats, stream
+from roleminer.api.routes import companies, jobs, preferences, runs, stats, stream
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ app.include_router(companies.router)
 app.include_router(runs.router)
 app.include_router(stream.router)
 app.include_router(stats.router)
+app.include_router(preferences.router)
 
 
 @app.get("/health")
