@@ -8,3 +8,5 @@ output/*.json
 roleminer/registry/roleminer.db
 resume.pdf
 .env
+frontend/node_modules/
+frontend/dist/

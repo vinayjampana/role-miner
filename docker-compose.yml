@@ -1,0 +1,23 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./output:/app/output
+      - ./roleminer/registry:/app/roleminer/registry
+      - ./search_profile.yaml:/app/search_profile.yaml:ro
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm ci && npm run build && npx serve dist -p 3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api

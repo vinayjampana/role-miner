@@ -1,4 +1,5 @@
 """SQLite registry for company data and run history."""
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +35,20 @@ CREATE TABLE IF NOT EXISTS runs (
     jobs_scored INTEGER,
     tokens_used INTEGER,
     cost_usd    REAL,
-    output_file TEXT
+    output_file TEXT,
+    status      TEXT DEFAULT 'completed',
+    duration_seconds REAL
+);
+"""
+
+_DDL_RUN_EVENTS = """
+CREATE TABLE IF NOT EXISTS run_events (
+    id          INTEGER PRIMARY KEY,
+    run_id      INTEGER NOT NULL,
+    ts          TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    source      TEXT,
+    data        TEXT NOT NULL
 );
 """
 
@@ -43,15 +57,23 @@ CREATE TABLE IF NOT EXISTS runs (
 # ---------------------------------------------------------------------------
 
 SEED_COMPANIES: list[dict] = [
-    # --- India product companies (verified working ATS boards) ---
     {
-        "name": "PhonePe",
-        "domain": "phonepe.com",
+        "name": "Razorpay",
+        "domain": "razorpay.com",
         "ats_type": "greenhouse",
-        "ats_slug": "phonepe",
+        "ats_slug": "razorpay",
         "hq_city": "Bangalore",
         "company_type": "product",
-        "funding_stage": "Series E",
+        "funding_stage": "Series F",
+    },
+    {
+        "name": "Meesho",
+        "domain": "meesho.com",
+        "ats_type": "greenhouse",
+        "ats_slug": "meesho",
+        "hq_city": "Bangalore",
+        "company_type": "product",
+        "funding_stage": "Series H",
     },
     {
         "name": "Groww",
@@ -63,60 +85,23 @@ SEED_COMPANIES: list[dict] = [
         "funding_stage": "Series D",
     },
     {
-        "name": "Slice",
-        "domain": "sliceit.com",
-        "ats_type": "greenhouse",
-        "ats_slug": "slice",
-        "hq_city": "Bangalore",
-        "company_type": "product",
-        "funding_stage": "Series B",
-    },
-    {
-        "name": "Meesho",
-        "domain": "meesho.com",
-        "ats_type": "lever",
-        "ats_slug": "meesho",
-        "hq_city": "Bangalore",
-        "company_type": "product",
-        "funding_stage": "Series H",
-    },
-    {
         "name": "CRED",
         "domain": "cred.club",
-        "ats_type": "lever",
+        "ats_type": "greenhouse",
         "ats_slug": "cred",
         "hq_city": "Bangalore",
         "company_type": "product",
         "funding_stage": "Series E",
     },
     {
-        "name": "InMobi",
-        "domain": "inmobi.com",
+        "name": "BrowserStack",
+        "domain": "browserstack.com",
         "ats_type": "greenhouse",
-        "ats_slug": "inmobi",
-        "hq_city": "Bangalore",
+        "ats_slug": "browserstack",
+        "hq_city": "Mumbai",
         "company_type": "product",
-        "funding_stage": "Public",
+        "funding_stage": "Series B",
     },
-    {
-        "name": "Hotstar",
-        "domain": "hotstar.com",
-        "ats_type": "lever",
-        "ats_slug": "hotstar",
-        "hq_city": "Bangalore",
-        "company_type": "product",
-        "funding_stage": "Public",
-    },
-    {
-        "name": "Freshworks",
-        "domain": "freshworks.com",
-        "ats_type": "lever",
-        "ats_slug": "freshworks",
-        "hq_city": "Chennai",
-        "company_type": "product",
-        "funding_stage": "Public",
-    },
-    # --- Global product companies with India engineering offices ---
     {
         "name": "Postman",
         "domain": "postman.com",
@@ -129,47 +114,102 @@ SEED_COMPANIES: list[dict] = [
     {
         "name": "Atlassian",
         "domain": "atlassian.com",
-        "ats_type": "lever",
+        "ats_type": "greenhouse",
         "ats_slug": "atlassian",
         "hq_city": "Bangalore",
         "company_type": "product",
         "funding_stage": "Public",
     },
     {
-        "name": "Figma",
-        "domain": "figma.com",
+        "name": "Sarvam AI",
+        "domain": "sarvam.ai",
         "ats_type": "greenhouse",
-        "ats_slug": "figma",
+        "ats_slug": "sarvam-ai",
         "hq_city": "Bangalore",
         "company_type": "product",
-        "funding_stage": "Public",
+        "funding_stage": "Series A",
     },
     {
-        "name": "Datadog",
-        "domain": "datadoghq.com",
-        "ats_type": "greenhouse",
-        "ats_slug": "datadog",
-        "hq_city": "Hyderabad",
+        "name": "Zepto",
+        "domain": "zeptonow.com",
+        "ats_type": "lever",
+        "ats_slug": "zepto",
+        "hq_city": "Mumbai",
         "company_type": "product",
-        "funding_stage": "Public",
+        "funding_stage": "Series F",
     },
     {
-        "name": "Stripe",
-        "domain": "stripe.com",
-        "ats_type": "greenhouse",
-        "ats_slug": "stripe",
-        "hq_city": "Bangalore",
-        "company_type": "product",
-        "funding_stage": "Public",
-    },
-    {
-        "name": "Linear",
-        "domain": "linear.app",
+        "name": "Slice",
+        "domain": "sliceit.com",
         "ats_type": "ashby",
-        "ats_slug": "linear",
-        "hq_city": "Remote",
+        "ats_slug": "slice",
+        "hq_city": "Bangalore",
         "company_type": "product",
         "funding_stage": "Series B",
+    },
+    {
+        "name": "PhonePe",
+        "domain": "phonepe.com",
+        "ats_type": "greenhouse",
+        "ats_slug": "phonepe",
+        "hq_city": "Bangalore",
+        "company_type": "product",
+        "funding_stage": "Series E",
+    },
+    {
+        "name": "Swiggy",
+        "domain": "swiggy.com",
+        "ats_type": "greenhouse",
+        "ats_slug": "swiggy",
+        "hq_city": "Bangalore",
+        "company_type": "product",
+        "funding_stage": "Public",
+    },
+    {
+        "name": "Chargebee",
+        "domain": "chargebee.com",
+        "ats_type": "greenhouse",
+        "ats_slug": "chargebee",
+        "hq_city": "Chennai",
+        "company_type": "product",
+        "funding_stage": "Series H",
+    },
+    {
+        "name": "Freshworks",
+        "domain": "freshworks.com",
+        "ats_type": "greenhouse",
+        "ats_slug": "freshworks",
+        "hq_city": "Chennai",
+        "company_type": "product",
+        "funding_stage": "Public",
+    },
+    # ----- Workday tenants -----
+    {
+        "name": "PayPal",
+        "domain": "paypal.com",
+        "ats_type": "workday",
+        "careers_url": "https://paypal.wd1.myworkdayjobs.com/wday/cxs/paypal/jobs/jobs",
+        "hq_city": "Bangalore",
+        "company_type": "product",
+        "funding_stage": "Public",
+    },
+    {
+        "name": "Adobe",
+        "domain": "adobe.com",
+        "ats_type": "workday",
+        "careers_url": "https://adobe.wd5.myworkdayjobs.com/wday/cxs/adobe/external_experienced/jobs",
+        "hq_city": "Bangalore",
+        "company_type": "product",
+        "funding_stage": "Public",
+    },
+    {
+        "name": "Walmart Global Tech",
+        "domain": "walmart.com",
+        "ats_type": "workday",
+        "careers_url": "https://walmart.wd5.myworkdayjobs.com/wday/cxs/walmart/WalmartExternal/jobs",
+        "hq_city": "Bangalore",
+        "company_type": "product",
+        "funding_stage": "Public",
     },
 ]
 
@@ -187,6 +227,14 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_DDL_COMPANIES)
     conn.execute(_DDL_RUNS)
+    conn.execute(_DDL_RUN_EVENTS)
+    # Lightweight migrations for existing DBs missing new columns.
+    cur = conn.execute("PRAGMA table_info(runs)")
+    existing_cols = {row["name"] for row in cur.fetchall()}
+    if "status" not in existing_cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN status TEXT DEFAULT 'completed'")
+    if "duration_seconds" not in existing_cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN duration_seconds REAL")
     conn.commit()
     return conn
 
@@ -199,7 +247,6 @@ def insert_company(conn: sqlite3.Connection, data: dict) -> int:
         "company_type", "funding_stage", "last_scraped_at", "embedding_id",
     ]
     fields = {k: data.get(k) for k in cols if k in data or data.get(k) is not None}
-    # always include name
     fields["name"] = data["name"]
 
     placeholders = ", ".join("?" for _ in fields)
@@ -248,7 +295,7 @@ def delete_company(conn: sqlite3.Connection, company_id: int) -> None:
 
 def insert_run(conn: sqlite3.Connection, data: dict) -> int:
     """Insert a run record. Returns the new row id."""
-    cols = ["timestamp", "jobs_found", "jobs_scored", "tokens_used", "cost_usd", "output_file"]
+    cols = ["timestamp", "jobs_found", "jobs_scored", "tokens_used", "cost_usd", "output_file", "status", "duration_seconds"]
     fields = {k: data.get(k) for k in cols}
     if not fields.get("timestamp"):
         fields["timestamp"] = datetime.now(tz=timezone.utc).isoformat()
@@ -272,3 +319,51 @@ def get_run_history(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
         (limit,),
     )
     return [_row_to_dict(r) for r in cur.fetchall()]
+
+
+def get_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
+    cur = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
+    row = cur.fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def update_run(conn: sqlite3.Connection, run_id: int, fields: dict) -> None:
+    if not fields:
+        return
+    sets = ", ".join(f"{k} = ?" for k in fields.keys())
+    values = list(fields.values()) + [run_id]
+    conn.execute(f"UPDATE runs SET {sets} WHERE id = ?", values)
+    conn.commit()
+
+
+def insert_run_event(
+    conn: sqlite3.Connection,
+    run_id: int,
+    event_type: str,
+    data: dict,
+    source: str = "",
+) -> int:
+    """Insert a structured run event. Returns row id."""
+    ts = datetime.now(tz=timezone.utc).isoformat()
+    cur = conn.execute(
+        "INSERT INTO run_events (run_id, ts, event_type, source, data) VALUES (?, ?, ?, ?, ?)",
+        (run_id, ts, event_type, source or "", json.dumps(data, default=str)),
+    )
+    conn.commit()
+    return cur.lastrowid  # type: ignore[return-value]
+
+
+def get_run_events(conn: sqlite3.Connection, run_id: int) -> list[dict]:
+    cur = conn.execute(
+        "SELECT * FROM run_events WHERE run_id = ? ORDER BY id ASC",
+        (run_id,),
+    )
+    out = []
+    for row in cur.fetchall():
+        d = _row_to_dict(row)
+        try:
+            d["data"] = json.loads(d.get("data") or "{}")
+        except json.JSONDecodeError:
+            d["data"] = {}
+        out.append(d)
+    return out
