@@ -30,6 +30,11 @@ from roleminer.registry.ats_detect import detect_ats_from_url, find_embedded_ats
             "https://adobe.wd5.myworkdayjobs.com/wday/cxs/adobe/external_experienced/jobs",
             ("workday", ""),
         ),
+        ("https://careers.smartrecruiters.com/Freshworks", ("smartrecruiters", "Freshworks")),
+        (
+            "https://jobs.smartrecruiters.com/Freshworks/13df8f7a-433d-46ad-a4f0-9d5771d69fe2",
+            ("smartrecruiters", "Freshworks"),
+        ),
     ],
 )
 def test_detect_ats_positive(url, expected):

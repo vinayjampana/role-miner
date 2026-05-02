@@ -24,9 +24,97 @@ function findEvent(events: RunEvent[], type: string): RunEvent | undefined {
   return events.find((e) => e.event_type === type);
 }
 
+/** Prefer latest SSE payload while a run is live so job snapshots update before refetch. */
+function mergedEventData(
+  evs: RunEvent[],
+  liveEvs: StreamEvent[],
+  isLive: boolean,
+  type: string,
+): Record<string, any> | undefined {
+  const fromDb = findEvent(evs, type)?.data;
+  if (!isLive) return fromDb;
+  for (let i = liveEvs.length - 1; i >= 0; i--) {
+    if (liveEvs[i].type === type) return liveEvs[i].data ?? {};
+  }
+  return fromDb;
+}
+
+type JobSnapshot = { total?: number; truncated?: boolean; items?: Array<Record<string, any>> };
+
+function JobSnapshotTable({
+  snapshot,
+  emptyHint,
+}: {
+  snapshot?: JobSnapshot;
+  emptyHint?: string;
+}) {
+  const items = snapshot?.items ?? [];
+  if (!items.length) {
+    return emptyHint ? <div className="text-xs text-slate-400 mt-2">{emptyHint}</div> : null;
+  }
+  const showRank = items.some((r) => r.rank_score != null);
+  const showScore = items.some((r) => r.score != null);
+  const total = snapshot?.total ?? items.length;
+  const trunc = snapshot?.truncated;
+
+  return (
+    <div className="mt-3 border border-slate-100 rounded-lg overflow-hidden">
+      <div className="px-3 py-1.5 bg-slate-50 text-xs text-slate-500 flex justify-between">
+        <span>
+          <strong className="text-slate-700">{total}</strong> job{total === 1 ? "" : "s"}
+          {trunc ? <span className="text-amber-600 ml-2">(showing first {items.length})</span> : null}
+        </span>
+      </div>
+      <div className="max-h-64 overflow-y-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-slate-50/80 text-slate-500 sticky top-0">
+            <tr>
+              {showScore && <th className="text-left px-2 py-1.5 w-10">#</th>}
+              {showRank && <th className="text-right px-2 py-1.5 w-16 font-mono">sim</th>}
+              <th className="text-left px-2 py-1.5">Role</th>
+              <th className="text-left px-2 py-1.5">Company</th>
+              <th className="text-left px-2 py-1.5 w-8" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {items.map((r, i) => (
+              <tr key={i} className="hover:bg-slate-50/80">
+                {showScore && (
+                  <td className="px-2 py-1 font-mono text-slate-600">{r.score ?? "—"}</td>
+                )}
+                {showRank && (
+                  <td className="px-2 py-1 text-right font-mono text-indigo-700">{r.rank_score ?? "—"}</td>
+                )}
+                <td className="px-2 py-1 text-slate-800 max-w-[200px] truncate" title={String(r.title ?? "")}>
+                  {r.title}
+                </td>
+                <td className="px-2 py-1 text-slate-500 max-w-[120px] truncate">{r.company}</td>
+                <td className="px-2 py-1">
+                  {r.url ? (
+                    <a
+                      href={String(r.url)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-blue-600 hover:underline"
+                    >
+                      ↗
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Sidebar ────────────────────────────────────────────────────────────────
 
-export function RunLogs() {
+export function RunLogs({ initialRunId }: { initialRunId?: number | null }) {
   const qc = useQueryClient();
   const { data: runs = [] } = useQuery({
     queryKey: ["runs"],
@@ -35,7 +123,7 @@ export function RunLogs() {
     staleTime: 0,
     refetchOnMount: "always",
   });
-  const [selected, setSelected] = useState<number | null>(() => readStoredRunId());
+  const [selected, setSelected] = useState<number | null>(() => initialRunId ?? readStoredRunId());
 
   const setSelectedPersist = (id: number | null) => {
     setSelected(id);
@@ -124,12 +212,25 @@ function deriveSteps(evs: RunEvent[], liveEvs: StreamEvent[], isLive: boolean): 
     ? [...evs.map((e) => ({ type: e.event_type, data: e.data })), ...liveEvs.map((e) => ({ type: e.type, data: e.data ?? {} }))]
     : evs.map((e) => ({ type: e.event_type, data: e.data }));
 
-  const has = (t: string) => all.some((e) => e.type === t);
-  const get = (t: string) => all.find((e) => e.type === t)?.data ?? {};
+  const has = (t: string) => {
+    if (isLive && liveEvs.some((e) => e.type === t)) return true;
+    return evs.some((e) => e.event_type === t);
+  };
+  const get = (t: string) => {
+    if (isLive) {
+      for (let i = liveEvs.length - 1; i >= 0; i--) {
+        if (liveEvs[i].type === t) return liveEvs[i].data ?? {};
+      }
+    }
+    return findEvent(evs, t)?.data ?? {};
+  };
 
   const scrapeStarted = has("scrape_start") || has("scraper_start");
   const scraperCount = all.filter((e) => e.type === "scraper_done").length;
   const totalSources = (get("scrape_start") as any)?.total_sources ?? 0;
+  const scrapeDoneEvt = has("scrape_done");
+  const dedupDone = has("dedup_done") || has("filter_done");
+  const dd = get("dedup_done") as any;
   const filterDone = has("filter_done");
   const roleDone = has("role_filter_done");
   const embedDone = has("embed_done");
@@ -148,6 +249,12 @@ function deriveSteps(evs: RunEvent[], liveEvs: StreamEvent[], isLive: boolean): 
       label: "Scrape",
       status: !scrapeStarted ? "pending" : !filterDone && isLive ? "running" : "done",
       detail: totalSources > 0 ? `${scraperCount}/${totalSources} sources` : scraperCount > 0 ? `${scraperCount} sources` : undefined,
+    },
+    {
+      key: "dedup",
+      label: "Dedup",
+      status: !dedupDone ? (scrapeDoneEvt && isLive ? "running" : "pending") : "done",
+      detail: dd?.total_in != null ? `${dd.total_in} → ${dd.total_out} (−${dd.removed ?? 0})` : undefined,
     },
     {
       key: "filter",
@@ -405,12 +512,13 @@ function RunDetailView({ runId }: { runId: number }) {
   if (!detail) return null;
 
   const evs = detail.events ?? [];
-  const filt = findEvent(evs, "filter_done")?.data;
-  const role = findEvent(evs, "role_filter_done")?.data;
-  const embed = findEvent(evs, "embed_done")?.data;
-  const rank = findEvent(evs, "rank_done")?.data;
-  const score = findEvent(evs, "score_done")?.data;
-  const discover = findEvent(evs, "discover_done")?.data;
+  const discover = mergedEventData(evs, liveEvs, !!isLive, "discover_done");
+  const dedup = mergedEventData(evs, liveEvs, !!isLive, "dedup_done");
+  const filt = mergedEventData(evs, liveEvs, !!isLive, "filter_done");
+  const role = mergedEventData(evs, liveEvs, !!isLive, "role_filter_done");
+  const embed = mergedEventData(evs, liveEvs, !!isLive, "embed_done");
+  const rank = mergedEventData(evs, liveEvs, !!isLive, "rank_done");
+  const score = mergedEventData(evs, liveEvs, !!isLive, "score_done");
 
   const steps = deriveSteps(evs, liveEvs, !!isLive);
 
@@ -464,6 +572,18 @@ function RunDetailView({ runId }: { runId: number }) {
       {/* Scraper progress */}
       <ScraperTable evs={evs} liveEvs={liveEvs} isLive={!!isLive} />
 
+      {/* URL deduplication */}
+      {dedup && (dedup.total_in != null || dedup.jobs) && (
+        <div className="bg-white rounded-lg border border-slate-200 p-4">
+          <div className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">Dedup by job URL</div>
+          <div className="text-sm text-slate-700">
+            <strong>{dedup.total_in ?? "—"}</strong> scraped → <strong>{dedup.total_out ?? "—"}</strong> unique
+            {dedup.removed != null ? <span className="text-slate-400"> ({dedup.removed} duplicates removed)</span> : null}
+          </div>
+          <JobSnapshotTable snapshot={dedup.jobs as JobSnapshot} />
+        </div>
+      )}
+
       {/* Company discovery */}
       {discover && (
         <div className="bg-white rounded-lg border border-slate-200 p-4">
@@ -501,11 +621,22 @@ function RunDetailView({ runId }: { runId: number }) {
               <summary className="text-xs text-slate-400 cursor-pointer">Sample dropped jobs</summary>
               <ul className="mt-1 text-xs text-slate-500 space-y-0.5 pl-3">
                 {(filt.sample_dropped as any[]).map((s, i) => (
-                  <li key={i}>{s.title} @ {s.company} — <span className="text-slate-400">{s.reason}{s.age_days ? ` (${s.age_days}d old)` : ""}</span></li>
+                  <li key={i}>
+                    {s.url ? (
+                      <a href={s.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">{s.title}</a>
+                    ) : s.title}
+                    {" @ "}{s.company} — <span className="text-slate-400">{s.reason}{s.age_days ? ` (${s.age_days}d old)` : ""}</span>
+                  </li>
                 ))}
               </ul>
             </details>
           )}
+          <details className="mt-3">
+            <summary className="text-xs font-semibold text-slate-600 cursor-pointer hover:text-slate-800">
+              Jobs passing rule filter ({(filt.jobs_passed as JobSnapshot)?.total ?? filt.total_out ?? 0})
+            </summary>
+            <JobSnapshotTable snapshot={filt.jobs_passed as JobSnapshot} emptyHint="No jobs in this step." />
+          </details>
         </div>
       )}
 
@@ -517,10 +648,21 @@ function RunDetailView({ runId }: { runId: number }) {
           {role.sample_dropped?.length > 0 && (
             <ul className="mt-2 text-xs text-slate-400 space-y-0.5 pl-3 list-disc">
               {(role.sample_dropped as any[]).map((s: any, i: number) => (
-                <li key={i}>{s.title} @ {s.company}</li>
+                <li key={i}>
+                  {s.url ? (
+                    <a href={s.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">{s.title}</a>
+                  ) : s.title}
+                  {" @ "}{s.company}
+                </li>
               ))}
             </ul>
           )}
+          <details className="mt-3">
+            <summary className="text-xs font-semibold text-slate-600 cursor-pointer hover:text-slate-800">
+              Jobs passing role filter ({(role.jobs_passed as JobSnapshot)?.total ?? role.total_out ?? 0})
+            </summary>
+            <JobSnapshotTable snapshot={role.jobs_passed as JobSnapshot} emptyHint="No jobs in this step." />
+          </details>
         </div>
       )}
 
@@ -547,6 +689,12 @@ function RunDetailView({ runId }: { runId: number }) {
             ))}
           </div>
           <div className="text-xs text-slate-400 mt-1">top {rank.sent_to_scorer} sent to scorer</div>
+          <details className="mt-3">
+            <summary className="text-xs font-semibold text-slate-600 cursor-pointer hover:text-slate-800">
+              Ranked jobs ({(rank.jobs_ranked as JobSnapshot)?.total ?? rank.total_ranked ?? 0})
+            </summary>
+            <JobSnapshotTable snapshot={rank.jobs_ranked as JobSnapshot} emptyHint="No ranked jobs." />
+          </details>
         </div>
       )}
 
@@ -581,6 +729,12 @@ function RunDetailView({ runId }: { runId: number }) {
               ))}
             </div>
           </div>
+          <details className="mt-3">
+            <summary className="text-xs font-semibold text-slate-600 cursor-pointer hover:text-slate-800">
+              All LLM-scored jobs ({(score.jobs_scored_detail as JobSnapshot)?.total ?? score.jobs_scored ?? 0})
+            </summary>
+            <JobSnapshotTable snapshot={score.jobs_scored_detail as JobSnapshot} emptyHint="No scored jobs." />
+          </details>
           <details className="mt-4">
             <summary className="cursor-pointer text-xs text-slate-400 hover:text-slate-600">LLM prompt preview</summary>
             <pre className="bg-slate-950 text-slate-300 text-xs p-3 mt-2 rounded whitespace-pre-wrap overflow-x-auto max-h-40">

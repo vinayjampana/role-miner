@@ -76,7 +76,7 @@ async def scrape(careers_url: str, session: httpx.AsyncClient, company_name: str
     if not careers_url:
         return []
 
-    body = {"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": "engineer"}
+    _PAGE = 20
     parsed = urlparse(careers_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     headers = {
@@ -87,42 +87,54 @@ async def scrape(careers_url: str, session: httpx.AsyncClient, company_name: str
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
     }
 
-    try:
-        data = await _post(session, careers_url, body, headers)
-    except Exception as exc:
-        logger.warning("Workday[%s] fetch failed: %s", company_name or careers_url, exc)
-        return []
-
     jobs: list[Job] = []
     name = company_name or "Unknown"
+    offset = 0
 
-    for item in data.get("jobPostings", []):
+    while True:
+        body = {"appliedFacets": {}, "limit": _PAGE, "offset": offset, "searchText": "engineer"}
         try:
-            title = item.get("title", "")
-            external_path = item.get("externalPath", "")
-            location = item.get("locationsText") or ""
-            if not location and item.get("bulletFields"):
-                location = item["bulletFields"][0]
-            posted_on = item.get("postedOn", "")
-            date_iso = _parse_posted_on(posted_on)
-
-            url = _build_job_url(careers_url, external_path)
-
-            combined = f"{title} {location}".lower()
-            work_mode = "remote" if "remote" in combined else ("hybrid" if "hybrid" in combined else "onsite")
-
-            jobs.append(Job(
-                title=title,
-                company=name,
-                url=url,
-                date_posted=date_iso,
-                location=location,
-                source="workday",
-                work_mode=work_mode,
-                jd_text="",
-            ))
+            data = await _post(session, careers_url, body, headers)
         except Exception as exc:
-            logger.debug("Workday[%s] skipping malformed job: %s", name, exc)
+            logger.warning("Workday[%s] fetch failed at offset=%d: %s", name, offset, exc)
+            break
+
+        postings = data.get("jobPostings", [])
+        if not postings:
+            break
+
+        for item in postings:
+            try:
+                title = item.get("title", "")
+                external_path = item.get("externalPath", "")
+                location = item.get("locationsText") or ""
+                if not location and item.get("bulletFields"):
+                    location = item["bulletFields"][0]
+                posted_on = item.get("postedOn", "")
+                date_iso = _parse_posted_on(posted_on)
+
+                url = _build_job_url(careers_url, external_path)
+
+                combined = f"{title} {location}".lower()
+                work_mode = "remote" if "remote" in combined else ("hybrid" if "hybrid" in combined else "onsite")
+
+                jobs.append(Job(
+                    title=title,
+                    company=name,
+                    url=url,
+                    date_posted=date_iso,
+                    location=location,
+                    source="workday",
+                    work_mode=work_mode,
+                    jd_text="",
+                ))
+            except Exception as exc:
+                logger.debug("Workday[%s] skipping malformed job: %s", name, exc)
+
+        total = data.get("total") or data.get("totalJobCount") or 0
+        offset += len(postings)
+        if offset >= total or len(postings) < _PAGE:
+            break
 
     logger.info("Workday[%s] fetched %d jobs", name, len(jobs))
     return jobs

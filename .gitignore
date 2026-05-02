@@ -6,6 +6,7 @@ __pycache__/
 .claude/
 output/*.json
 roleminer/registry/roleminer.db
+roleminer.db
 resume.pdf
 .env
 frontend/node_modules/

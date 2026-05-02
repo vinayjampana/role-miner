@@ -54,6 +54,7 @@ def filter_by_role(jobs: list[Job]) -> tuple[list[Job], list[dict]]:
             dropped.append({
                 "title": job.title,
                 "company": job.company,
+                "url": job.url,
                 "reason": "role_mismatch",
             })
         else:

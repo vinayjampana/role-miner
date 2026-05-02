@@ -56,16 +56,48 @@ function eventLabel(ev: StreamEvent): { color: string; text: string } {
           ? `discovered ${d.new_companies} new companies: ${(d.names as string[]).join(", ")}`
           : "no new companies discovered",
       };
-    case "filter_done":
-      return { color: "text-purple-400", text: `filter: ${d.total_in} → ${d.total_out} (stale:${d.dropped_stale} loc:${d.dropped_location} salary:${d.dropped_salary})` };
-    case "role_filter_done":
-      return { color: "text-purple-300", text: `role filter: ${d.total_in} → ${d.total_out} (dropped ${d.dropped})` };
+    case "dedup_done": {
+      const jn = d.jobs?.total ?? d.total_out;
+      const trunc = d.jobs?.truncated ? ` (log cap ${(d.jobs?.items as unknown[])?.length ?? "?"})` : "";
+      return {
+        color: "text-amber-300",
+        text: `dedup URL: ${d.total_in} → ${d.total_out} (−${d.removed}) · ${jn} unique jobs in run log${trunc}`,
+      };
+    }
+    case "filter_done": {
+      const jp = d.jobs_passed?.total ?? d.total_out;
+      const tr = d.jobs_passed?.truncated ? " · list truncated" : "";
+      return {
+        color: "text-purple-400",
+        text: `filter: ${d.total_in} → ${d.total_out} (stale:${d.dropped_stale} loc:${d.dropped_location} salary:${d.dropped_salary}) · ${jp} passed logged${tr}`,
+      };
+    }
+    case "role_filter_done": {
+      const jp = d.jobs_passed?.total ?? d.total_out;
+      const tr = d.jobs_passed?.truncated ? " · list truncated" : "";
+      return {
+        color: "text-purple-300",
+        text: `role filter: ${d.total_in} → ${d.total_out} (dropped ${d.dropped}) · ${jp} passed logged${tr}`,
+      };
+    }
     case "embed_done":
       return { color: "text-teal-400", text: `embedded ${d.jobs_embedded} jobs → ChromaDB` };
-    case "rank_done":
-      return { color: "text-indigo-400", text: `ranked ${d.total_ranked}, top score ${(d.top_scores?.[0] ?? 0).toFixed(3)}, sending ${d.sent_to_scorer} to scorer` };
-    case "score_done":
-      return { color: "text-emerald-300", text: `scored ${d.jobs_scored} jobs · ${d.tokens_used} tokens · $${d.cost_usd?.toFixed(5)}` };
+    case "rank_done": {
+      const jr = d.jobs_ranked?.total ?? d.total_ranked;
+      const tr = d.jobs_ranked?.truncated ? " · list truncated" : "";
+      return {
+        color: "text-indigo-400",
+        text: `ranked ${d.total_ranked}, top ${(d.top_scores?.[0] ?? 0).toFixed(3)}, → scorer ${d.sent_to_scorer} · ${jr} rows logged${tr}`,
+      };
+    }
+    case "score_done": {
+      const jd = d.jobs_scored_detail?.total ?? d.jobs_scored;
+      const tr = d.jobs_scored_detail?.truncated ? " · list truncated" : "";
+      return {
+        color: "text-emerald-300",
+        text: `scored ${d.jobs_scored} jobs · ${d.tokens_used} tok · $${d.cost_usd?.toFixed(5)} · ${jd} rows logged${tr}`,
+      };
+    }
     case "error":
       return { color: "text-red-500", text: `ERROR [${d.step}]: ${d.error}` };
     default:

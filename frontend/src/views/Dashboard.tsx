@@ -5,12 +5,12 @@ import { JobCard } from "../components/JobCard";
 import { JobDetail } from "../components/JobDetail";
 
 export function Dashboard() {
+  const [minScore, setMinScore] = useState(6);
+
   const { data: jobs = [], isLoading } = useQuery({
     queryKey: ["jobs-latest", minScore],
     queryFn: () => api.latestJobs(minScore),
   });
-
-  const [minScore, setMinScore] = useState(6);
   const [workModes, setWorkModes] = useState<Record<string, boolean>>({
     remote: true,
     hybrid: true,
@@ -110,7 +110,7 @@ export function Dashboard() {
         <div className="text-sm text-slate-600 mb-3">
           {isLoading
             ? "Loading…"
-            : `${filtered.length} of ${jobs.length} jobs (all runs for this profile, score ≥ 6)`}
+            : `${filtered.length} of ${jobs.length} jobs (all runs for this profile, score ≥ ${minScore})`}
         </div>
         <div className="grid gap-3 grid-cols-1 lg:grid-cols-2 xl:grid-cols-3">
           {filtered.map((j) => (

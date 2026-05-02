@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Optional
 
 import config
-from roleminer.registry.ats_detect import detect_ats_from_url, find_embedded_ats_url
+import re as _re
+
+from roleminer.registry.ats_detect import detect_ats_from_url, find_embedded_ats_url, workday_human_to_cxs
+from roleminer.registry.job_api_discover import discover_job_api_with_alternate_host
 from roleminer.registry.db import (
     init_db,
     insert_company,
@@ -44,7 +47,8 @@ from roleminer.registry.db import (
 from roleminer.registry import vector_store
 from roleminer.pipeline import embedder
 from roleminer.scrapers.base import Job, dedup_by_url, make_session
-from roleminer.scrapers import greenhouse, lever, ashby, cutshort, workday
+from roleminer.scrapers import greenhouse, lever, ashby, cutshort, workday, smartrecruiters
+from roleminer.scrapers import custom as custom_scraper
 from roleminer.pipeline.classifier import classify_company
 from roleminer.pipeline.filter import (
     filter_jobs, detect_work_mode, days_since,
@@ -62,11 +66,41 @@ logging.basicConfig(
 logger = logging.getLogger("roleminer.main")
 
 
+_JS_SRC_RE = _re.compile(r'src=["\']([^"\']+\.js)["\']', _re.IGNORECASE)
+_JS_CHUNK_LIMIT = 12
+
+
+async def _scan_js_chunks_for_ats(
+    session, html: str, base_url: str
+) -> tuple[str, tuple[str, str]] | None:
+    srcs = _JS_SRC_RE.findall(html)[:_JS_CHUNK_LIMIT]
+    if not srcs:
+        return None
+    from urllib.parse import urljoin
+    for src in srcs:
+        chunk_url = urljoin(base_url, src)
+        try:
+            cr = await session.get(chunk_url, follow_redirects=True, timeout=15.0)
+            if cr.status_code >= 400:
+                continue
+            embedded = find_embedded_ats_url(cr.text)
+            if embedded:
+                det = detect_ats_from_url(embedded)
+                if det:
+                    return embedded, det
+        except Exception:
+            continue
+    return None
+
+
 async def _resolve_careers_to_ats_url(session, careers_url: str) -> tuple[str, tuple[str, str] | None]:
     """
-    GET the careers page (follow redirects). If the response URL is not an ATS board,
-    scan HTML for embedded board URLs (iframe / links / JSON).
-    Returns (url_to_use_for_detection, detect_ats_from_url result or None).
+    Resolve a careers page URL to a scrappable ATS URL.
+
+    Pass 1 (fast): static HTTP fetch → check final URL + scan HTML.
+    Pass 2 (fallback): headless Chromium render → network requests + rendered DOM + hrefs.
+
+    Returns (canonical_ats_url_or_final_url, detect_ats_from_url_result_or_None).
     """
     u = (careers_url or "").strip()
     if not u:
@@ -89,25 +123,40 @@ async def _resolve_careers_to_ats_url(session, careers_url: str) -> tuple[str, t
         det = detect_ats_from_url(final)
         logger.info("[careers-resolve] step=detect(final_url) → %s", det)
         if det:
-            return final, det
+            canonical = workday_human_to_cxs(final) or final if det[0] == "workday" else final
+            return canonical, det
         html_len = len(r.text or "")
         logger.info("[careers-resolve] step=html_scan body_bytes=%s (no ATS in location bar)", html_len)
         embedded = find_embedded_ats_url(r.text)
         if embedded:
             det2 = detect_ats_from_url(embedded)
-            logger.info(
-                "[careers-resolve] step=embedded found=%s detect → %s",
-                embedded,
-                det2,
-            )
-            return embedded, det2
-        logger.info("[careers-resolve] step=embedded none — corporate page had no board URL in HTML")
-        return final, None
+            canonical2 = workday_human_to_cxs(embedded) or embedded if det2 and det2[0] == "workday" else embedded
+            logger.info("[careers-resolve] step=embedded found=%s detect → %s", canonical2, det2)
+            return canonical2, det2
+
+        js_det = await _scan_js_chunks_for_ats(session, r.text, final)
+        if js_det:
+            logger.info("[careers-resolve] step=js_chunk_scan found=%s", js_det)
+            return js_det[0], js_det[1]
+
+        api_url = await discover_job_api_with_alternate_host(session, r.text, final)
+        if api_url:
+            logger.info("[careers-resolve] step=job_api found=%s", api_url)
+            return api_url, ("custom_api", "")
+
+        logger.info("[careers-resolve] step=embedded none — trying browser render")
     except Exception as exc:
-        logger.warning("[careers-resolve] step=error %s — fallback detect on original url", exc)
-        det = detect_ats_from_url(u)
-        logger.info("[careers-resolve] step=detect(fallback) → %s", det)
-        return u, det
+        logger.warning("[careers-resolve] step=error %s — trying browser render", exc)
+
+    # Pass 2: JS-rendered page — headless browser fallback
+    try:
+        from roleminer.registry.browser_detect import detect_ats_with_browser
+        browser_url, browser_det = await detect_ats_with_browser(u)
+        logger.info("[careers-resolve] step=browser_detect → %s url=%s", browser_det, browser_url)
+        return browser_url, browser_det
+    except Exception as exc:
+        logger.warning("[careers-resolve] step=browser_detect error: %s", exc)
+        return u, None
 
 
 # ---------------------------------------------------------------------------
@@ -180,11 +229,31 @@ async def _scrape_company(
     )
 
     det: tuple[str, str] | None = None
+
+    if ats_type in ("", "custom") and not careers_url:
+        logger.info(
+            "[scrape] company=%r step=auto_discover (custom ats, no careers_url)",
+            name,
+        )
+        try:
+            from roleminer.registry.career_finder import _heuristic_search
+            discovered = await _heuristic_search(name, session)
+            if discovered:
+                careers_url = discovered
+                logger.info("[scrape] company=%r step=auto_discover found=%s", name, careers_url)
+                if conn and cid:
+                    update_company_fields(conn, cid, {"careers_url": careers_url})
+                    company["careers_url"] = careers_url
+            else:
+                logger.info("[scrape] company=%r step=auto_discover miss", name)
+        except Exception as exc:
+            logger.warning("[scrape] company=%r step=auto_discover error: %s", name, exc)
+
     needs_resolve = bool(
         careers_url
         and (
             ats_type in ("", "custom")
-            or (ats_type in ("greenhouse", "lever", "ashby") and not slug)
+            or (ats_type in ("greenhouse", "lever", "ashby", "smartrecruiters") and not slug)
         )
     )
     if needs_resolve:
@@ -231,7 +300,20 @@ async def _scrape_company(
     elif conn and cid and not det:
         logger.info("[scrape] company=%r step=db_patch skipped (no new ATS from resolve)", name)
 
-    if not slug and ats_type not in ("workday", "cutshort"):
+    if not slug and ats_type not in ("workday", "cutshort", "custom_api"):
+        if careers_url:
+            logger.info(
+                "[scrape] company=%r step=custom_playwright ats_type=%r careers_url=%s",
+                name, ats_type, careers_url,
+            )
+            try:
+                jobs = await custom_scraper.scrape(careers_url, company_name=name)
+                if jobs:
+                    logger.info("[scrape] company=%r step=custom_playwright jobs=%d", name, len(jobs))
+                    return jobs
+                logger.info("[scrape] company=%r step=custom_playwright zero jobs", name)
+            except Exception as exc:
+                logger.warning("[scrape] company=%r step=custom_playwright error: %s", name, exc)
         logger.warning(
             "[scrape] company=%r step=abort reason=no_ats_slug ats_type=%r careers_url=%s",
             name,
@@ -248,12 +330,18 @@ async def _scrape_company(
             jobs = await lever.scrape(slug, session, company_name=name)
         elif ats_type == "ashby":
             jobs = await ashby.scrape(slug, session, company_name=name)
+        elif ats_type == "smartrecruiters":
+            jobs = await smartrecruiters.scrape(slug, session, company_name=name)
         elif ats_type == "workday":
             jobs = await workday.scrape(careers_url, session, company_name=name)
         elif ats_type == "cutshort":
             skills = profile.get("skills", [])
             locations = profile.get("locations", [])
             jobs = await cutshort.scrape(skills, locations, session)
+        elif ats_type == "custom" and careers_url:
+            jobs = await custom_scraper.scrape(careers_url, company_name=name)
+        elif ats_type == "custom_api" and careers_url:
+            jobs = await custom_scraper.scrape_json_api(careers_url, session, company_name=name)
         else:
             logger.warning("[scrape] company=%r step=abort unknown ats_type=%r", name, ats_type)
             return []
@@ -275,6 +363,35 @@ async def _emit(
     insert_run_event(conn, run_id, event_type, data, source=source)
     if queue is not None:
         await queue.put({"type": event_type, "source": source, "data": data})
+
+
+# Cap job rows stored per run event (full title/company/url); keeps SQLite payloads bounded.
+_RUN_LOG_JOB_LIST_CAP = 200
+
+
+def _run_log_job_items(jobs: list, cap: int | None = None) -> dict:
+    c = cap if cap is not None else _RUN_LOG_JOB_LIST_CAP
+    items = [{"title": j.title, "company": j.company, "url": j.url} for j in jobs[:c]]
+    return {"total": len(jobs), "truncated": len(jobs) > c, "items": items}
+
+
+def _run_log_ranked_jobs(jobs: list, scores: list[float], cap: int | None = None) -> dict:
+    c = cap if cap is not None else _RUN_LOG_JOB_LIST_CAP
+    items: list[dict] = []
+    for i, j in enumerate(jobs[:c]):
+        row = {"title": j.title, "company": j.company, "url": j.url}
+        if i < len(scores):
+            row["rank_score"] = round(float(scores[i]), 4)
+        items.append(row)
+    return {"total": len(jobs), "truncated": len(jobs) > c, "items": items}
+
+
+def _run_log_scored_jobs(scored: list, cap: int = 55) -> dict:
+    items = [
+        {"title": j.title, "company": j.company, "url": j.url, "score": j.score}
+        for j in scored[:cap]
+    ]
+    return {"total": len(scored), "truncated": len(scored) > cap, "items": items}
 
 
 # ---------------------------------------------------------------------------
@@ -393,237 +510,11 @@ async def run_pipeline(
 
         total_raw = len(all_jobs)
 
-        # Auto-discover new companies from scraped job URLs
-        existing_names = {c["name"].lower() for c in get_all_companies(conn)}
-        discovered: list[dict] = []
-        seen_new: set[str] = set()
-        pd_skip_existing = pd_skip_dup = pd_skip_not_ats = pd_skip_no_name = 0
-        for job in all_jobs:
-            name_lower = (job.company or "").lower().strip()
-            if not name_lower:
-                pd_skip_no_name += 1
-                continue
-            if name_lower in existing_names:
-                pd_skip_existing += 1
-                continue
-            if name_lower in seen_new:
-                pd_skip_dup += 1
-                continue
-            result = detect_ats_from_url(job.url or "")
-            if not result:
-                pd_skip_not_ats += 1
-                continue
-            ats_type, slug = result
-            new_co: dict = {
-                "name": job.company,
-                "ats_type": ats_type,
-                "ats_slug": slug,
-                "company_type": job.company_type or "product",
-            }
-            if ats_type == "workday" and "/wday/cxs/" in (job.url or ""):
-                new_co["careers_url"] = job.url.split("?")[0]
-            row_id = insert_company(conn, new_co)
-            new_co["id"] = row_id
-            discovered.append(new_co)
-            seen_new.add(name_lower)
-            logger.info(
-                "[pipeline-discover] insert company=%r ats=%s/%s job_url=%s db_id=%s careers_url=%s",
-                job.company,
-                ats_type,
-                slug,
-                job.url,
-                row_id,
-                new_co.get("careers_url") or "(none)",
-            )
-        logger.info(
-            "[pipeline-discover] summary jobs_scanned=%d new_companies=%d skip_no_name=%d skip_in_registry=%d skip_dup_run=%d skip_url_not_ats=%d",
-            len(all_jobs),
-            len(discovered),
-            pd_skip_no_name,
-            pd_skip_existing,
-            pd_skip_dup,
-            pd_skip_not_ats,
-        )
-        await _emit(conn, run_id, "discover_done", {
-            "new_companies": len(discovered),
-            "names": [c["name"] for c in discovered],
+        await _emit(conn, run_id, "scrape_done", {
+            "total_jobs": total_raw,
         }, queue=event_queue)
 
-        # Dedup
-        all_jobs = dedup_by_url(all_jobs)
-
-        # Classify + work_mode
-        for job in all_jobs:
-            if not job.company_type:
-                job.company_type = classify_company(job.company, job.jd_text)
-            if not job.work_mode or job.work_mode == "onsite":
-                job.work_mode = detect_work_mode(job.title, job.jd_text, job.location)
-
-        # Filter — track drop reasons
-        filter_in = len(all_jobs)
-        dropped = Counter()
-        sample_dropped: list[dict] = []
-        passed: list[Job] = []
-
-        salary_min = profile.get("salary_min_lpa", 0)
-        profile_locations = [loc.lower() for loc in profile.get("locations", [])]
-        profile_work_modes = [m.lower() for m in profile.get("work_mode", [])]
-        profile_company_types = [ct.lower() for ct in profile.get("company_type", [])]
-        exclude_companies = [c.lower() for c in profile.get("exclude_companies", [])]
-        notice_days = profile.get("notice_days", 0)
-
-        for job in all_jobs:
-            job.has_esop = detect_esop(job.jd_text)
-            job.notice_compatible = detect_notice_compatible(job.jd_text, notice_days)
-
-            age = days_since(job.date_posted)
-            if age > 30:
-                dropped["stale"] += 1
-                if len(sample_dropped) < 5:
-                    sample_dropped.append({"title": job.title, "company": job.company, "reason": "stale", "age_days": round(age, 1)})
-                continue
-
-            job_loc_lower = _normalize_location(job.location)
-            location_match = any(loc in job_loc_lower for loc in profile_locations if loc)
-            remote_match = "remote" in job.work_mode.lower() and "remote" in profile_work_modes
-            if not location_match and not remote_match:
-                dropped["location"] += 1
-                if len(sample_dropped) < 5:
-                    sample_dropped.append({"title": job.title, "company": job.company, "reason": "location"})
-                continue
-
-            if job.salary_lpa and job.salary_lpa.get("max") is not None and job.salary_lpa["max"] < salary_min:
-                dropped["salary"] += 1
-                continue
-
-            if profile_company_types and "service" not in profile_company_types and job.company_type == "service":
-                dropped["company_type"] += 1
-                continue
-
-            if job.company.lower() in exclude_companies:
-                dropped["blocklist"] += 1
-                continue
-
-            passed.append(job)
-
-        await _emit(conn, run_id, "filter_done", {
-            "total_in": filter_in, "total_out": len(passed),
-            "dropped_stale": dropped["stale"],
-            "dropped_location": dropped["location"],
-            "dropped_salary": dropped["salary"],
-            "dropped_company_type": dropped["company_type"],
-            "dropped_blocklist": dropped["blocklist"],
-            "sample_dropped": sample_dropped,
-        }, queue=event_queue)
-
-        # Role filter
-        rf_in = len(passed)
-        passed, role_dropped = filter_by_role(passed)
-        await _emit(conn, run_id, "role_filter_done", {
-            "total_in": rf_in,
-            "total_out": len(passed),
-            "dropped": len(role_dropped),
-            "sample_dropped": role_dropped[:5],
-        }, queue=event_queue)
-
-        for job in passed:
-            upsert_job(conn, asdict(job))
-
-        # Embed + persist all filter-passing jobs to ChromaDB
-        if embedder.is_available() and passed:
-            try:
-                job_texts = [vector_store._job_text(j) for j in passed]
-                job_vecs = embedder.embed_batched(job_texts, input_type="passage")
-                chroma = vector_store.get_client(config.CHROMA_PATH)
-                vector_store.upsert_jobs(chroma, passed, run_id, job_vecs)
-                await _emit(conn, run_id, "embed_done", {
-                    "jobs_embedded": len(passed),
-                    "model": config.EMBED_MODEL,
-                }, queue=event_queue)
-            except Exception as exc:
-                logger.warning("Job embedding failed: %s", exc)
-
-        # Rank
-        ranked, rank_scores = rank_jobs(passed, profile, resume_summary)
-        replace_job_runs_for_run(conn, run_id, [asdict(j) for j in ranked], rank_scores)
-        await _emit(conn, run_id, "rank_done", {
-            "total_ranked": len(ranked),
-            "top_scores": [round(s, 4) for s in rank_scores[:10]],
-            "sent_to_scorer": min(50, len(ranked)),
-        }, queue=event_queue)
-
-        # Score
-        model = config.SCORING_MODEL
-        api_key = config.LLM_API_KEY
-        to_score = ranked[:50]
-        prompt_preview = _build_user_prompt(to_score, profile, resume_summary)[:300] if to_score else ""
-
-        scored, tokens_used, cost_usd = await score_jobs(
-            jobs=to_score, profile=profile, resume_summary=resume_summary,
-            model=model, api_key=api_key,
-        )
-        scored.sort(key=lambda j: j.score, reverse=True)
-        update_job_runs_scores(conn, run_id, [asdict(j) for j in scored])
-
-        # Score distribution
-        dist = {"0-3": 0, "4-6": 0, "7-10": 0}
-        for j in scored:
-            if j.score <= 3:
-                dist["0-3"] += 1
-            elif j.score <= 6:
-                dist["4-6"] += 1
-            else:
-                dist["7-10"] += 1
-
-        top_jobs_summary = [
-            {"title": j.title, "company": j.company, "score": j.score}
-            for j in scored[:5]
-        ]
-
-        await _emit(conn, run_id, "score_done", {
-            "jobs_scored": len(scored),
-            "chunks": 1,
-            "tokens_used": tokens_used,
-            "cost_usd": cost_usd,
-            "llm_prompt_preview": prompt_preview,
-            "score_distribution": dist,
-            "top_jobs": top_jobs_summary,
-        }, queue=event_queue)
-
-        # Write output JSON
-        config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        output_path = config.OUTPUT_DIR / f"scored_jobs_{timestamp}.json"
-        with open(output_path, "w") as fh:
-            json.dump([asdict(j) for j in scored], fh, indent=2)
-
-        duration = time.time() - started
-
-        update_run(conn, run_id, {
-            "jobs_found": total_raw,
-            "jobs_scored": len(scored),
-            "tokens_used": tokens_used,
-            "cost_usd": cost_usd,
-            "output_file": str(output_path),
-            "status": "completed",
-            "duration_seconds": duration,
-        })
-
-        summary = {
-            "run_id": run_id,
-            "jobs_found": total_raw,
-            "jobs_scored": len(scored),
-            "tokens_used": tokens_used,
-            "cost_usd": cost_usd,
-            "output_file": str(output_path),
-            "duration_seconds": duration,
-        }
-
-        if event_queue is not None:
-            await event_queue.put({"type": "done", "data": summary})
-            await event_queue.put(None)
-
-        return summary
+        await _pipeline_post_scrape(conn, run_id, all_jobs, profile, started, event_queue)
 
     except Exception as exc:
         logger.exception("Pipeline failed")
@@ -637,6 +528,312 @@ async def run_pipeline(
             await event_queue.put({"type": "done", "data": {"error": str(exc)}})
             await event_queue.put(None)
         raise
+
+
+async def _pipeline_post_scrape(
+    conn: sqlite3.Connection,
+    run_id: int,
+    all_jobs: list[Job],
+    profile: dict,
+    started: float,
+    event_queue: Optional[asyncio.Queue] = None,
+) -> dict:
+    resume_summary = profile.get("resume_summary", "")
+    total_raw = len(all_jobs)
+
+    existing_names = {c["name"].lower() for c in get_all_companies(conn)}
+    discovered: list[dict] = []
+    seen_new: set[str] = set()
+    pd_skip_existing = pd_skip_dup = pd_skip_not_ats = pd_skip_no_name = 0
+    for job in all_jobs:
+        name_lower = (job.company or "").lower().strip()
+        if not name_lower:
+            pd_skip_no_name += 1
+            continue
+        if name_lower in existing_names:
+            pd_skip_existing += 1
+            continue
+        if name_lower in seen_new:
+            pd_skip_dup += 1
+            continue
+        result = detect_ats_from_url(job.url or "")
+        if not result:
+            pd_skip_not_ats += 1
+            continue
+        ats_type, slug = result
+        new_co: dict = {
+            "name": job.company,
+            "ats_type": ats_type,
+            "ats_slug": slug,
+            "company_type": job.company_type or "product",
+        }
+        if ats_type == "workday" and "/wday/cxs/" in (job.url or ""):
+            new_co["careers_url"] = job.url.split("?")[0]
+        row_id = insert_company(conn, new_co)
+        new_co["id"] = row_id
+        discovered.append(new_co)
+        seen_new.add(name_lower)
+        logger.info(
+            "[pipeline-discover] insert company=%r ats=%s/%s job_url=%s db_id=%s careers_url=%s",
+            job.company, ats_type, slug, job.url, row_id,
+            new_co.get("careers_url") or "(none)",
+        )
+    logger.info(
+        "[pipeline-discover] summary jobs_scanned=%d new_companies=%d skip_no_name=%d skip_in_registry=%d skip_dup_run=%d skip_url_not_ats=%d",
+        len(all_jobs), len(discovered), pd_skip_no_name, pd_skip_existing, pd_skip_dup, pd_skip_not_ats,
+    )
+    await _emit(conn, run_id, "discover_done", {
+        "new_companies": len(discovered),
+        "names": [c["name"] for c in discovered],
+    }, queue=event_queue)
+
+    n_pre_dedup = len(all_jobs)
+    all_jobs = dedup_by_url(all_jobs)
+    dedup_jobs_snap = _run_log_job_items(all_jobs)
+    await _emit(conn, run_id, "dedup_done", {
+        "total_in": n_pre_dedup,
+        "total_out": len(all_jobs),
+        "removed": n_pre_dedup - len(all_jobs),
+        "jobs": dedup_jobs_snap,
+    }, queue=event_queue)
+    logger.info(
+        "[pipeline] run_id=%s dedup_done in=%d out=%d removed=%d event_items=%d truncated=%s",
+        run_id,
+        n_pre_dedup,
+        len(all_jobs),
+        n_pre_dedup - len(all_jobs),
+        len(dedup_jobs_snap["items"]),
+        dedup_jobs_snap["truncated"],
+    )
+
+    for job in all_jobs:
+        if not job.company_type:
+            job.company_type = classify_company(job.company, job.jd_text)
+        if not job.work_mode or job.work_mode == "onsite":
+            job.work_mode = detect_work_mode(job.title, job.jd_text, job.location)
+
+    filter_in = len(all_jobs)
+    dropped = Counter()
+    sample_dropped: list[dict] = []
+    passed: list[Job] = []
+
+    salary_min = profile.get("salary_min_lpa", 0)
+    profile_locations = [loc.lower() for loc in profile.get("locations", [])]
+    profile_work_modes = [m.lower() for m in profile.get("work_mode", [])]
+    profile_company_types = [ct.lower() for ct in profile.get("company_type", [])]
+    exclude_companies = [c.lower() for c in profile.get("exclude_companies", [])]
+    notice_days = profile.get("notice_days", 0)
+
+    for job in all_jobs:
+        job.has_esop = detect_esop(job.jd_text)
+        job.notice_compatible = detect_notice_compatible(job.jd_text, notice_days)
+
+        age = days_since(job.date_posted)
+        if age > 30:
+            dropped["stale"] += 1
+            if len(sample_dropped) < 5:
+                sample_dropped.append({
+                    "title": job.title, "company": job.company, "url": job.url,
+                    "reason": "stale", "age_days": round(age, 1),
+                })
+            continue
+
+        job_loc_lower = _normalize_location(job.location)
+        location_match = any(loc in job_loc_lower for loc in profile_locations if loc)
+        remote_match = "remote" in job.work_mode.lower() and "remote" in profile_work_modes
+        if not location_match and not remote_match:
+            dropped["location"] += 1
+            if len(sample_dropped) < 5:
+                sample_dropped.append({
+                    "title": job.title, "company": job.company, "url": job.url,
+                    "reason": "location",
+                })
+            continue
+
+        if job.salary_lpa and job.salary_lpa.get("max") is not None and job.salary_lpa["max"] < salary_min:
+            dropped["salary"] += 1
+            if len(sample_dropped) < 5:
+                sample_dropped.append({
+                    "title": job.title, "company": job.company, "url": job.url,
+                    "reason": "salary",
+                })
+            continue
+
+        if profile_company_types and "service" not in profile_company_types and job.company_type == "service":
+            dropped["company_type"] += 1
+            if len(sample_dropped) < 5:
+                sample_dropped.append({
+                    "title": job.title, "company": job.company, "url": job.url,
+                    "reason": "company_type",
+                })
+            continue
+
+        if job.company.lower() in exclude_companies:
+            dropped["blocklist"] += 1
+            if len(sample_dropped) < 5:
+                sample_dropped.append({
+                    "title": job.title, "company": job.company, "url": job.url,
+                    "reason": "blocklist",
+                })
+            continue
+
+        passed.append(job)
+
+    filter_passed_snap = _run_log_job_items(passed)
+    await _emit(conn, run_id, "filter_done", {
+        "total_in": filter_in, "total_out": len(passed),
+        "dropped_stale": dropped["stale"],
+        "dropped_location": dropped["location"],
+        "dropped_salary": dropped["salary"],
+        "dropped_company_type": dropped["company_type"],
+        "dropped_blocklist": dropped["blocklist"],
+        "sample_dropped": sample_dropped,
+        "jobs_passed": filter_passed_snap,
+    }, queue=event_queue)
+    logger.info(
+        "[pipeline] run_id=%s filter_done in=%d out=%d event_items=%d truncated=%s dropped=%s",
+        run_id,
+        filter_in,
+        len(passed),
+        len(filter_passed_snap["items"]),
+        filter_passed_snap["truncated"],
+        dict(dropped),
+    )
+
+    rf_in = len(passed)
+    passed, role_dropped = filter_by_role(passed)
+    role_passed_snap = _run_log_job_items(passed)
+    await _emit(conn, run_id, "role_filter_done", {
+        "total_in": rf_in,
+        "total_out": len(passed),
+        "dropped": len(role_dropped),
+        "sample_dropped": role_dropped[:15],
+        "jobs_passed": role_passed_snap,
+    }, queue=event_queue)
+    logger.info(
+        "[pipeline] run_id=%s role_filter_done in=%d out=%d event_items=%d truncated=%s role_dropped=%d",
+        run_id,
+        rf_in,
+        len(passed),
+        len(role_passed_snap["items"]),
+        role_passed_snap["truncated"],
+        len(role_dropped),
+    )
+
+    for job in passed:
+        upsert_job(conn, asdict(job))
+
+    if embedder.is_available() and passed:
+        try:
+            job_texts = [vector_store._job_text(j) for j in passed]
+            job_vecs = embedder.embed_batched(job_texts, input_type="passage")
+            chroma = vector_store.get_client(config.CHROMA_PATH)
+            vector_store.upsert_jobs(chroma, passed, run_id, job_vecs)
+            await _emit(conn, run_id, "embed_done", {
+                "jobs_embedded": len(passed),
+                "model": config.EMBED_MODEL,
+            }, queue=event_queue)
+        except Exception as exc:
+            logger.warning("Job embedding failed: %s", exc)
+
+    ranked, rank_scores = rank_jobs(passed, profile, resume_summary)
+    replace_job_runs_for_run(conn, run_id, [asdict(j) for j in ranked], rank_scores)
+    ranked_snap = _run_log_ranked_jobs(ranked, rank_scores)
+    await _emit(conn, run_id, "rank_done", {
+        "total_ranked": len(ranked),
+        "top_scores": [round(s, 4) for s in rank_scores[:10]],
+        "sent_to_scorer": min(50, len(ranked)),
+        "jobs_ranked": ranked_snap,
+    }, queue=event_queue)
+    logger.info(
+        "[pipeline] run_id=%s rank_done total=%d event_items=%d truncated=%s top_score=%s",
+        run_id,
+        len(ranked),
+        len(ranked_snap["items"]),
+        ranked_snap["truncated"],
+        round(float(rank_scores[0]), 4) if rank_scores else None,
+    )
+
+    model = config.SCORING_MODEL
+    api_key = config.LLM_API_KEY
+    to_score = ranked[:50]
+    prompt_preview = _build_user_prompt(to_score, profile, resume_summary)[:300] if to_score else ""
+
+    scored, tokens_used, cost_usd = await score_jobs(
+        jobs=to_score, profile=profile, resume_summary=resume_summary,
+        model=model, api_key=api_key,
+    )
+    scored.sort(key=lambda j: j.score, reverse=True)
+    update_job_runs_scores(conn, run_id, [asdict(j) for j in scored])
+
+    dist = {"0-3": 0, "4-6": 0, "7-10": 0}
+    for j in scored:
+        if j.score <= 3:
+            dist["0-3"] += 1
+        elif j.score <= 6:
+            dist["4-6"] += 1
+        else:
+            dist["7-10"] += 1
+
+    top_jobs_summary = [
+        {"title": j.title, "company": j.company, "score": j.score}
+        for j in scored[:5]
+    ]
+    scored_list_snap = _run_log_scored_jobs(scored, cap=55)
+
+    await _emit(conn, run_id, "score_done", {
+        "jobs_scored": len(scored),
+        "chunks": 1,
+        "tokens_used": tokens_used,
+        "cost_usd": cost_usd,
+        "llm_prompt_preview": prompt_preview,
+        "score_distribution": dist,
+        "top_jobs": top_jobs_summary,
+        "jobs_scored_detail": scored_list_snap,
+    }, queue=event_queue)
+    logger.info(
+        "[pipeline] run_id=%s score_done scored=%d event_items=%d truncated=%s tokens=%s cost_usd=%s",
+        run_id,
+        len(scored),
+        len(scored_list_snap["items"]),
+        scored_list_snap["truncated"],
+        tokens_used,
+        round(cost_usd, 6) if cost_usd else 0,
+    )
+
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    output_path = config.OUTPUT_DIR / f"scored_jobs_{timestamp}.json"
+    with open(output_path, "w") as fh:
+        json.dump([asdict(j) for j in scored], fh, indent=2)
+
+    duration = time.time() - started
+
+    update_run(conn, run_id, {
+        "jobs_found": total_raw,
+        "jobs_scored": len(scored),
+        "tokens_used": tokens_used,
+        "cost_usd": cost_usd,
+        "output_file": str(output_path),
+        "status": "completed",
+        "duration_seconds": duration,
+    })
+
+    summary = {
+        "run_id": run_id,
+        "jobs_found": total_raw,
+        "jobs_scored": len(scored),
+        "tokens_used": tokens_used,
+        "cost_usd": cost_usd,
+        "output_file": str(output_path),
+        "duration_seconds": duration,
+    }
+
+    if event_queue is not None:
+        await event_queue.put({"type": "done", "data": summary})
+        await event_queue.put(None)
+
+    return summary
 
 
 def reset_scrape_freshness_cli() -> None:

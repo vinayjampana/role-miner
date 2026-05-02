@@ -2,13 +2,23 @@
 
 Personal job discovery tool for senior engineering roles in India. Scrapes multiple sources, scores against your profile, surfaces a ranked shortlist via CLI or React dashboard.
 
+## Recent updates (since last release commit)
+
+- **Custom career sites**: Playwright-based DOM scraper with pagination; **proprietary JSON APIs** discovered from JS bundles (`custom_api` ATS type), including split-bundle heuristics (e.g. Cars24 via `careers.{domain}` fallback and `*.team` API hosts). `job_api_discover` module; Docker image installs Playwright browsers.
+- **SmartRecruiters**: New scraper + ATS detection; **Freshworks** seed uses `https://careers.smartrecruiters.com/Freshworks`.
+- **Resolve / detect**: JS chunk scan for embedded ATS URLs; **Playwright fallback** (`browser_detect`) when static HTML has no board URL; Workday human URLs normalized to CXS where applicable.
+- **Registry seed**: **Darwinbox** added (`custom`, Darwinbox careers URL); **Razorpay** and other seed fixes as in `db.py`.
+- **Run logs**: New **`dedup_done`** event; rule filter, role filter, rank, and score events include **capped job snapshots** (title, company, URL; rank/score where relevant). Structured **`logger.info`** summaries per step. RunLogs UI: **Dedup** pipeline step, expandable job tables, live SSE merges so snapshots update before refetch; stream lines show truncation hints.
+- **API**: `POST /companies/{company_id}/scrape` runs scrape + post-scrape pipeline for one registry company (background task + run_events / SSE like full runs).
+- **Tests**: `test_cars24_custom_api`, `test_smartrecruiters`, `test_custom_scrape_debug`, expanded ATS detect coverage (~110+ phase1 tests).
+
 ## What it does
 
 ```
 resume_summary + search_profile.yaml
-  → scrape: Greenhouse · Lever · Ashby · Cutshort · Workday
+  → scrape: Greenhouse · Lever · Ashby · Cutshort · Workday · SmartRecruiters · custom / custom_api
   → skip companies scraped within 24h (freshness cache)
-  → dedup by URL
+  → dedup by URL (logged as dedup_done with job snapshot in run_events)
   → auto-discover new companies from scraped job URLs
   → filter: freshness (30d) · location · salary LPA · product-only · blocklist
   → role filter: drop DS/DevOps/mobile/PM titles
@@ -117,6 +127,7 @@ All routes are under the app root (e.g. `/jobs/latest`). The API uses a lightwei
 | GET | `/stats` | Aggregate totals + per-source job counts |
 | GET | `/companies` | All companies in registry |
 | POST | `/companies/discover` | Discover career URLs for company names (SSE stream) |
+| POST | `/companies/{id}/scrape` | Scrape one registry company and run filter → embed → rank → score (returns `run_id`) |
 | GET | `/users` | List users |
 | POST | `/users` | Create user |
 | GET | `/me` | Current user (from `X-User-Id`) + active profile |
@@ -134,14 +145,15 @@ All routes are under the app root (e.g. `/jobs/latest`). The API uses a lightwei
 **Tracker** — grouped board for jobs you have marked (saved, archived, applied, clicked, etc.) with readable section titles.
 
 **RunLogs** — per-run pipeline breakdown:
-- Pipeline step tracker: Scrape → Filter → Role → Embed → Rank → Score with live status badges
+- Pipeline step tracker: Scrape → **Dedup** → Filter → Role → Embed → Rank → Score with live status badges
 - Scraper table: all companies with per-company status (pending / scraping… / ✓ / ⏭ fresh / error)
 - Company discovery: new companies found via ATS URL detection each run
-- Filter drop chart: stale / location / salary / company_type / blocklist
-- Role filter: how many dropped + sample titles
+- **Dedup**: unique job count after URL deduplication + expandable table of jobs in the log (capped)
+- Filter drop chart: stale / location / salary / company_type / blocklist; **jobs passing rule filter** (table)
+- Role filter: how many dropped + samples; **jobs passing role filter** (table)
 - Embedding: jobs embedded count + model name
-- Ranker: top similarity scores
-- Scorer: jobs scored · tokens · cost · score distribution chart · top 5 jobs · LLM prompt preview
+- Ranker: top similarity scores; **ranked jobs** table (similarity + links)
+- Scorer: jobs scored · tokens · cost · score distribution chart · top 5 jobs · **all scored jobs table** · LLM prompt preview
 - Errors panel: real-time error display with traceback (shown as soon as any error arrives)
 - Live events terminal with timestamps via SSE; replays from DB for finished runs
 
@@ -171,8 +183,8 @@ Two persistent collections (default path under `roleminer/registry/chroma/`):
 
 ## Stack
 
-- **Scraping**: HTTPX + tenacity retry
-- **ATS support**: Greenhouse · Lever · Ashby · Cutshort · Workday
+- **Scraping**: HTTPX + tenacity retry; **Playwright** for custom career pages and ATS browser-detect fallback
+- **ATS support**: Greenhouse · Lever · Ashby · Cutshort · Workday · **SmartRecruiters** · **custom** (Playwright) · **custom_api** (discovered JSON endpoints)
 - **Storage**: SQLite (companies + runs + run_events) + ChromaDB (embeddings)
 - **Pipeline**: rule filter → role filter → embed → semantic rank → single LLM score call
 - **Embeddings**: `nvidia/llama-nemotron-embed-vl-1b-v2:free` via OpenRouter
@@ -189,11 +201,13 @@ search_profile.yaml        # your job preferences
 Dockerfile
 docker-compose.yml
 roleminer/
-├── scrapers/              # greenhouse · lever · ashby · cutshort · workday
+├── scrapers/              # greenhouse · lever · ashby · cutshort · workday · smartrecruiters · custom
 ├── registry/
 │   ├── db.py              # SQLite CRUD (companies, runs, run_events, users, profiles, job_status)
 │   ├── vector_store.py    # ChromaDB collections (companies + jobs)
 │   ├── ats_detect.py      # ATS URL detection + embedded career links
+│   ├── job_api_discover.py # scan JS bundles for proprietary job-list APIs
+│   ├── browser_detect.py  # Playwright ATS detection fallback
 │   ├── chroma/            # default Chroma persistence directory
 │   └── career_finder.py   # 4-step company career URL discovery
 ├── pipeline/
@@ -220,7 +234,7 @@ tests/
 
 | Phase | Status | What |
 |-------|--------|------|
-| 1 | ✅ Done | Greenhouse · Lever · Ashby · Cutshort + filter + LLM scorer (75 tests) |
+| 1 | ✅ Done | Greenhouse · Lever · Ashby · Cutshort · SmartRecruiters + custom scrapers + filter + LLM scorer (110+ tests) |
 | 2 | ✅ Done | Workday scraper · TF-IDF ranker · role filter · expanded seed companies |
 | 3 | ✅ Done | Docker Compose · run_events DB · structured pipeline event logging |
 | 4 | ✅ Done | FastAPI + SSE + React Dashboard + RunLogs with live stream |
@@ -231,7 +245,7 @@ tests/
 
 ```bash
 pytest tests/phase1/ -v
-# 75 passed
+# 110+ passed (includes live HTTP probes where safe)
 ```
 
 Live HTTP tests hit real public APIs (Greenhouse/Lever/Ashby). LLM calls are mocked.

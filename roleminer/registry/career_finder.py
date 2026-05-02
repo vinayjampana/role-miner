@@ -8,7 +8,7 @@ import httpx
 from openai import OpenAI
 
 import config
-from roleminer.registry.ats_detect import detect_ats_from_url, find_embedded_ats_url
+from roleminer.registry.ats_detect import detect_ats_from_url, find_embedded_ats_url, workday_human_to_cxs
 from roleminer.registry.db import get_all_companies, insert_company
 
 logger = logging.getLogger(__name__)
@@ -37,8 +37,12 @@ def _careers_url_candidates(domain: str) -> list[str]:
 
 async def _expand_careers_url(url: str, client: httpx.AsyncClient) -> str:
     """
-    Final URL after redirects; if the page stays on the corporate domain, scan HTML
-    for embedded Greenhouse / Lever / Ashby / Workday board URLs.
+    Resolve a careers page URL to the scrappable ATS URL.
+
+    Pass 1: static HTTP fetch → check final URL + scan HTML for ATS embed.
+    Pass 2: headless browser render (JS-rendered pages, Workday hrefs, etc.).
+
+    Returns the best URL found (CXS API URL for Workday, board URL for others).
     """
     if not url or not url.strip():
         logger.info("[discover-expand] empty input — skip")
@@ -58,18 +62,25 @@ async def _expand_careers_url(url: str, client: httpx.AsyncClient) -> str:
         if r.status_code >= 400:
             return u0
         if det_f:
-            return final
+            return workday_human_to_cxs(final) or final if det_f[0] == "workday" else final
         embedded = find_embedded_ats_url(r.text)
-        out = embedded or final
-        logger.info(
-            "[discover-expand] step=html_scan bytes=%s embedded=%s → out=%s",
-            len(r.text or ""),
-            embedded,
-            out,
-        )
-        return out
+        if embedded:
+            det_e = detect_ats_from_url(embedded)
+            canonical = workday_human_to_cxs(embedded) or embedded if det_e and det_e[0] == "workday" else embedded
+            logger.info("[discover-expand] step=html_scan bytes=%s embedded=%s", len(r.text or ""), canonical)
+            return canonical
+        logger.info("[discover-expand] step=html_scan bytes=%s no ATS found — trying browser", len(r.text or ""))
     except Exception as exc:
-        logger.warning("[discover-expand] step=error %s — return original url", exc)
+        logger.warning("[discover-expand] step=error %s — trying browser", exc)
+
+    # Pass 2: headless browser for JS-rendered pages
+    try:
+        from roleminer.registry.browser_detect import detect_ats_with_browser
+        browser_url, browser_det = await detect_ats_with_browser(u0)
+        logger.info("[discover-expand] step=browser detect=%s url=%s", browser_det, browser_url)
+        return browser_url
+    except Exception as exc:
+        logger.warning("[discover-expand] step=browser error: %s", exc)
     return u0
 
 
@@ -83,9 +94,13 @@ async def _probe(url: str, client: httpx.AsyncClient) -> str | None:
         final = str(r.url)
         det = detect_ats_from_url(final)
         if det:
-            logger.info("[discover-probe] seed=%s → final=%s detect=%s", url, final, det)
-            return final
+            canonical = workday_human_to_cxs(final) or final if det[0] == "workday" else final
+            logger.info("[discover-probe] seed=%s → final=%s canonical=%s detect=%s", url, final, canonical, det)
+            return canonical
         embedded = find_embedded_ats_url(r.text)
+        if embedded:
+            det_e = detect_ats_from_url(embedded)
+            embedded = workday_human_to_cxs(embedded) or embedded if det_e and det_e[0] == "workday" else embedded
         out = embedded or final
         logger.info(
             "[discover-probe] seed=%s → final=%s embedded=%s out=%s",
@@ -137,7 +152,7 @@ async def _brave_search(name: str, client: httpx.AsyncClient) -> str | None:
         results = resp.json().get("web", {}).get("results", [])
         for r in results:
             url = r.get("url", "")
-            if any(kw in url.lower() for kw in ["careers", "jobs", "greenhouse", "lever", "ashby", "workday"]):
+            if any(kw in url.lower() for kw in ["careers", "jobs", "greenhouse", "lever", "ashby", "workday", "smartrecruiters"]):
                 logger.info("[discover] %r step=search brave picked (keyword) url=%s", name, url)
                 return url
         if results:
@@ -161,7 +176,7 @@ def _llm_batch(names: list[str]) -> list[dict]:
         "For each company below, return their official careers/jobs page URL.\n"
         "Return ONLY a JSON array. Each object: "
         '{"name": "...", "domain": "...", "careers_url": "...", '
-        '"ats_type": "greenhouse|lever|ashby|workday|custom|unknown", "ats_slug": "..."}\n'
+            '"ats_type": "greenhouse|lever|ashby|workday|smartrecruiters|custom|unknown", "ats_slug": "..."}\n'
         "ats_slug: slug from the ATS URL (e.g. boards.greenhouse.io/SLUG). Empty string if not applicable.\n"
         "If unknown, set careers_url to null.\n\n"
         f"Companies:\n{names_str}"
@@ -191,13 +206,24 @@ async def discover_companies(
 ) -> list[dict]:
     """
     Run 4-step discovery for each name. Returns list of result dicts.
+
+    Step 1 — cache: DB hit with known ATS → done.
+    Step 2 — heuristic: probe common URL patterns, expand with browser.
+    Step 3 — search: Brave web search + browser expand.
+    Step 4 — LLM: batch prompt for any still missing OR resolved as "custom"
+              (heuristic/search found a URL but couldn't identify the ATS).
+
     Saves discovered companies to DB automatically.
     """
     clean_names = [n.strip() for n in names if n.strip()]
     logger.info("[discover] start count=%d names=%s", len(clean_names), clean_names)
     existing = {c["name"].lower(): c for c in get_all_companies(conn)}
-    results: list[dict] = []
-    needs_search: list[str] = []  # heuristic failed, needs search/LLM
+
+    # best_result tracks the per-name best result so far (keyed by name.lower()).
+    # LLM phase may upgrade a "custom" entry to a known ATS.
+    best_result: dict[str, dict] = {}
+    needs_search: list[str] = []   # heuristic found nothing
+    needs_llm: list[str] = []      # heuristic/search found URL but ats_type=custom
 
     async with httpx.AsyncClient(
         headers={"User-Agent": "Mozilla/5.0"},
@@ -207,19 +233,16 @@ async def discover_companies(
             name = name.strip()
             if not name:
                 continue
+            key = name.lower()
 
-            # Step 1: cache / DB
-            cached = existing.get(name.lower())
-            if cached and (cached.get("careers_url") or cached.get("ats_slug")):
+            # Step 1: cache / DB — skip if already has a non-custom ATS
+            cached = existing.get(key)
+            if cached and cached.get("ats_slug"):
                 logger.info(
-                    "[discover] %r step=cache hit company_id=%s careers_url=%s ats=%s/%s",
-                    name,
-                    cached.get("id"),
-                    cached.get("careers_url"),
-                    cached.get("ats_type"),
-                    cached.get("ats_slug"),
+                    "[discover] %r step=cache hit ats=%s/%s",
+                    name, cached.get("ats_type"), cached.get("ats_slug"),
                 )
-                results.append({
+                best_result[key] = {
                     "name": name,
                     "found": True,
                     "careers_url": cached.get("careers_url"),
@@ -229,15 +252,32 @@ async def discover_companies(
                     "method": "cache",
                     "already_in_db": True,
                     "company_id": cached.get("id"),
-                })
+                }
+                continue
+            if cached and cached.get("careers_url") and cached.get("ats_type") not in (None, "", "custom"):
+                logger.info(
+                    "[discover] %r step=cache hit (workday) careers_url=%s",
+                    name, cached.get("careers_url"),
+                )
+                best_result[key] = {
+                    "name": name,
+                    "found": True,
+                    "careers_url": cached.get("careers_url"),
+                    "ats_type": cached.get("ats_type"),
+                    "ats_slug": cached.get("ats_slug"),
+                    "domain": cached.get("domain"),
+                    "method": "cache",
+                    "already_in_db": True,
+                    "company_id": cached.get("id"),
+                }
                 continue
 
-            # Step 2: heuristics
-            logger.info("[discover] %r step=heuristic begin (not in cache with url/slug)", name)
+            # Step 2: heuristics (static probe + browser expand built into _heuristic_search)
+            logger.info("[discover] %r step=heuristic begin", name)
             url = await _heuristic_search(name, http)
             if url:
                 ats = detect_ats_from_url(url)
-                r = {
+                r: dict = {
                     "name": name,
                     "found": True,
                     "careers_url": url,
@@ -248,33 +288,25 @@ async def discover_companies(
                     "already_in_db": bool(cached),
                     "company_id": None,
                 }
-                results.append(r)
-                needs_search.append(name)  # still mark for save after this
-                logger.info(
-                    "[discover] %r step=heuristic save ats=%s/%s url=%s",
-                    name,
-                    r["ats_type"],
-                    r["ats_slug"],
-                    r["careers_url"],
-                )
+                best_result[key] = r
                 _save_result(r, conn, cached)
+                logger.info("[discover] %r step=heuristic ats=%s/%s url=%s", name, r["ats_type"], r["ats_slug"], url)
+                if r["ats_type"] == "custom":
+                    needs_llm.append(name)  # found URL but no ATS — try LLM refinement
                 continue
 
             needs_search.append(name)
 
-        # Step 3: web search for misses
-        still_missing: list[str] = []
-        logger.info("[discover] step=search phase needs_search=%d", len(needs_search))
+        # Step 3: web search for heuristic misses
+        logger.info("[discover] step=search phase count=%d", len(needs_search))
         for name in needs_search:
-            # check if already resolved by heuristic above
-            if any(r["name"] == name and r["method"] == "heuristic" for r in results):
-                continue
-            logger.info("[discover] %r step=search brave_query begin", name)
+            key = name.lower()
+            cached = existing.get(key)
+            logger.info("[discover] %r step=search begin", name)
             url = await _brave_search(name, http)
             if url:
                 url = await _expand_careers_url(url, http)
                 ats = detect_ats_from_url(url)
-                cached = existing.get(name.lower())
                 r = {
                     "name": name,
                     "found": True,
@@ -286,67 +318,69 @@ async def discover_companies(
                     "already_in_db": bool(cached),
                     "company_id": None,
                 }
-                results.append(r)
-                logger.info(
-                    "[discover] %r step=search save ats=%s/%s url=%s",
-                    name,
-                    r["ats_type"],
-                    r["ats_slug"],
-                    r["careers_url"],
-                )
+                best_result[key] = r
                 _save_result(r, conn, cached)
+                logger.info("[discover] %r step=search ats=%s/%s url=%s", name, r["ats_type"], r["ats_slug"], url)
+                if r["ats_type"] == "custom":
+                    needs_llm.append(name)
             else:
-                logger.info("[discover] %r step=search miss → will try LLM", name)
-                still_missing.append(name)
+                logger.info("[discover] %r step=search miss → LLM", name)
+                needs_llm.append(name)
 
-        # Step 4: LLM batch for all remaining (expand URLs inside same client scope)
-        if still_missing:
-            logger.info("[discover] step=llm phase still_missing=%d %s", len(still_missing), still_missing)
-            llm_results = _llm_batch(still_missing)
+        # Step 4: LLM — for misses AND custom-only results (Option B)
+        if needs_llm:
+            logger.info("[discover] step=llm phase count=%d names=%s", len(needs_llm), needs_llm)
+            llm_results = _llm_batch(needs_llm)
             llm_map = {r.get("name", "").lower(): r for r in llm_results}
-            for name in still_missing:
-                lr = llm_map.get(name.lower())
-                cached = existing.get(name.lower())
+            for name in needs_llm:
+                key = name.lower()
+                lr = llm_map.get(key)
+                cached = existing.get(key)
+                prior = best_result.get(key)  # may have a careers_url from heuristic/search
+
                 if lr and lr.get("careers_url"):
                     raw_llm = lr["careers_url"]
-                    logger.info("[discover] %r step=llm raw careers_url=%s llm_ats=%s/%s", name, raw_llm, lr.get("ats_type"), lr.get("ats_slug"))
+                    logger.info("[discover] %r step=llm raw=%s llm_ats=%s/%s", name, raw_llm, lr.get("ats_type"), lr.get("ats_slug"))
                     url = await _expand_careers_url(raw_llm, http)
                     ats_from_url = detect_ats_from_url(url)
+                    ats_type = ats_from_url[0] if ats_from_url else lr.get("ats_type")
+                    ats_slug = ats_from_url[1] if ats_from_url else lr.get("ats_slug", "")
+
+                    # Only upgrade if LLM gave a better (non-custom) result
+                    if ats_type in (None, "custom", "unknown") and prior:
+                        logger.info("[discover] %r step=llm kept prior (LLM also custom)", name)
+                        continue
+
                     r = {
                         "name": name,
                         "found": True,
                         "careers_url": url,
-                        "ats_type": ats_from_url[0] if ats_from_url else lr.get("ats_type"),
-                        "ats_slug": ats_from_url[1] if ats_from_url else lr.get("ats_slug", ""),
+                        "ats_type": ats_type,
+                        "ats_slug": ats_slug,
                         "domain": lr.get("domain"),
                         "method": "llm",
                         "already_in_db": bool(cached),
                         "company_id": None,
                     }
-                    results.append(r)
-                    logger.info(
-                        "[discover] %r step=llm save expanded_url=%s ats=%s/%s (from_url=%s)",
-                        name,
-                        url,
-                        r["ats_type"],
-                        r["ats_slug"],
-                        ats_from_url,
-                    )
+                    best_result[key] = r
                     _save_result(r, conn, cached)
+                    logger.info("[discover] %r step=llm saved ats=%s/%s url=%s", name, ats_type, ats_slug, url)
                 else:
-                    logger.info("[discover] %r step=llm failed no careers_url in LLM row=%s", name, lr)
-                    results.append({
-                        "name": name,
-                        "found": False,
-                        "careers_url": None,
-                        "ats_type": None,
-                        "ats_slug": None,
-                        "domain": None,
-                        "method": "failed",
-                        "already_in_db": bool(cached),
-                        "company_id": None,
-                    })
+                    logger.info("[discover] %r step=llm no careers_url — row=%s", name, lr)
+                    if not prior:
+                        best_result[key] = {
+                            "name": name,
+                            "found": False,
+                            "careers_url": None,
+                            "ats_type": None,
+                            "ats_slug": None,
+                            "domain": None,
+                            "method": "failed",
+                            "already_in_db": bool(cached),
+                            "company_id": None,
+                        }
 
+    results = list(best_result.values())
     found_n = sum(1 for x in results if x.get("found"))
     logger.info("[discover] complete results=%d found=%d", len(results), found_n)
     return results

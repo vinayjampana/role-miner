@@ -126,7 +126,98 @@ function DiscoverPanel({ onAdded }: { onAdded: () => void }) {
   );
 }
 
-export function Companies() {
+function CompanyRow({ c, onScraped, onNavigateToRun }: { c: Company; onScraped: () => void; onNavigateToRun: (runId: number) => void }) {
+  const [scraping, setScraping] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+
+  const run = async () => {
+    setScraping(true);
+    setResult(null);
+    try {
+      const res = await api.scrapeCompany(c.id);
+      onScraped();
+      if (res.run_id) {
+        onNavigateToRun(res.run_id);
+      }
+    } catch (e: any) {
+      setResult(e.message || "Unknown error");
+    } finally {
+      setScraping(false);
+    }
+  };
+
+  const boardHref = careersBoardUrl(c);
+
+  return (
+    <tr className="border-b border-slate-100 hover:bg-slate-50/80">
+      <td className="px-3 py-2 align-top">
+        <div className="font-medium text-slate-900">{c.name}</div>
+        {c.domain ? (
+          <div className="text-xs text-slate-500">{c.domain}</div>
+        ) : null}
+      </td>
+      <td className="px-3 py-2 align-top text-slate-700 whitespace-nowrap">{formatAts(c)}</td>
+      <td className="px-3 py-2 align-top text-slate-700">{c.hq_city || "—"}</td>
+      <td className="px-3 py-2 align-top text-slate-700">{c.company_type || "—"}</td>
+      <td className="px-3 py-2 align-top text-slate-700">{c.funding_stage || "—"}</td>
+      <td className="px-3 py-2 align-top max-w-[220px]">
+        {c.tech_stack?.length ? (
+          <div className="flex flex-wrap gap-1">
+            {c.tech_stack.slice(0, 6).map((t) => (
+              <span
+                key={t}
+                className="inline-block text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-700"
+              >
+                {t}
+              </span>
+            ))}
+            {c.tech_stack.length > 6 ? (
+              <span className="text-xs text-slate-500">+{c.tech_stack.length - 6}</span>
+            ) : null}
+          </div>
+        ) : (
+          "—"
+        )}
+      </td>
+      <td className="px-3 py-2 align-top text-slate-600 text-xs whitespace-nowrap">
+        {c.last_scraped_at
+          ? new Date(c.last_scraped_at).toLocaleString(undefined, {
+              dateStyle: "short",
+              timeStyle: "short",
+            })
+          : "—"}
+      </td>
+      <td className="px-3 py-2 align-top">
+        {boardHref ? (
+          <a
+            href={boardHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sky-700 hover:underline text-xs"
+          >
+            Open
+          </a>
+        ) : (
+          "—"
+        )}
+      </td>
+      <td className="px-3 py-2 align-top">
+        <button
+          onClick={run}
+          disabled={scraping}
+          className="px-2 py-1 text-xs rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {scraping ? "Running…" : "Run"}
+        </button>
+        {result && (
+          <div className="text-xs text-red-500 mt-0.5">{result}</div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+export function Companies({ onNavigateToRun }: { onNavigateToRun: (runId: number) => void }) {
   const qc = useQueryClient();
   const { data: companies = [], isLoading, isError } = useQuery({
     queryKey: ["companies"],
@@ -224,67 +315,13 @@ export function Companies() {
                 <th className="px-3 py-2 font-semibold">Tech stack</th>
                 <th className="px-3 py-2 font-semibold">Last scraped</th>
                 <th className="px-3 py-2 font-semibold">Careers</th>
+                <th className="px-3 py-2 font-semibold">Scrape</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((c) => {
-                const boardHref = careersBoardUrl(c);
-                return (
-                  <tr key={c.id} className="border-b border-slate-100 hover:bg-slate-50/80">
-                    <td className="px-3 py-2 align-top">
-                      <div className="font-medium text-slate-900">{c.name}</div>
-                      {c.domain ? (
-                        <div className="text-xs text-slate-500">{c.domain}</div>
-                      ) : null}
-                    </td>
-                    <td className="px-3 py-2 align-top text-slate-700 whitespace-nowrap">{formatAts(c)}</td>
-                    <td className="px-3 py-2 align-top text-slate-700">{c.hq_city || "—"}</td>
-                    <td className="px-3 py-2 align-top text-slate-700">{c.company_type || "—"}</td>
-                    <td className="px-3 py-2 align-top text-slate-700">{c.funding_stage || "—"}</td>
-                    <td className="px-3 py-2 align-top max-w-[220px]">
-                      {c.tech_stack?.length ? (
-                        <div className="flex flex-wrap gap-1">
-                          {c.tech_stack.slice(0, 6).map((t) => (
-                            <span
-                              key={t}
-                              className="inline-block text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-700"
-                            >
-                              {t}
-                            </span>
-                          ))}
-                          {c.tech_stack.length > 6 ? (
-                            <span className="text-xs text-slate-500">+{c.tech_stack.length - 6}</span>
-                          ) : null}
-                        </div>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td className="px-3 py-2 align-top text-slate-600 text-xs whitespace-nowrap">
-                      {c.last_scraped_at
-                        ? new Date(c.last_scraped_at).toLocaleString(undefined, {
-                            dateStyle: "short",
-                            timeStyle: "short",
-                          })
-                        : "—"}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      {boardHref ? (
-                        <a
-                          href={boardHref}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-sky-700 hover:underline text-xs"
-                        >
-                          Open
-                        </a>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
+              {filtered.map((c) => (
+                <CompanyRow key={c.id} c={c} onScraped={() => qc.invalidateQueries({ queryKey: ["companies"] })} onNavigateToRun={onNavigateToRun} />
+              ))}
             </tbody>
           </table>
         </div>

@@ -1,6 +1,6 @@
 # RoleMiner — CLAUDE.md
 
-India-first job discovery tool. Scrapes 5 ATS sources, scores against candidate profile, surfaces ranked shortlist via FastAPI + React.
+India-first job discovery tool. Scrapes multiple ATS sources (Greenhouse, Lever, Ashby, Cutshort, Workday, SmartRecruiters, custom/custom_api), scores against candidate profile, surfaces ranked shortlist via FastAPI + React.
 
 ## Project Goal
 
@@ -8,7 +8,7 @@ Personal tool for Vinay to find relevant senior engineering roles in India. Not 
 
 ## Stack
 
-- Python 3.11+ · FastAPI · SQLite · ChromaDB · HTTPX · scikit-learn (TF-IDF fallback)
+- Python 3.11+ · FastAPI · SQLite · ChromaDB · HTTPX · Playwright (custom careers + ATS browser-detect) · scikit-learn (TF-IDF fallback)
 - React 18 · Vite · TypeScript · React Query · Recharts · Tailwind
 - Docker Compose (local + VPS deploy)
 - LLM: any OpenAI-compatible API via `LLM_API_KEY` + `LLM_BASE_URL` env vars
@@ -25,7 +25,7 @@ Personal tool for Vinay to find relevant senior engineering roles in India. Not 
 - **Single LLM call per run** — batch score top 50 jobs, structured JSON output
 - All scrapers return same `Job` dataclass — decoupled from pipeline
 - **LLM config via env**: `LLM_API_KEY`, `LLM_BASE_URL`, `SCORING_MODEL` — no hardcoded provider
-- **run_events table**: every pipeline step logged to SQLite with timing + errors — drives SSE stream and RunLogs UI
+- **run_events table**: every pipeline step logged to SQLite with timing + errors — drives SSE stream and RunLogs UI; **dedup_done** + filter/rank/score events include **capped job snapshots** (`jobs` / `jobs_passed` / `jobs_ranked` / `jobs_scored_detail`) for debugging; server logs **`[pipeline] run_id=…`** summaries per step
 - **Scraper freshness**: `SCRAPER_FRESHNESS_HOURS` (default 24h) — skip companies scraped recently; emits `scraper_skipped` event
 - **Stale run cleanup**: on server startup, runs stuck in `running` status → auto-marked `failed`
 - **Company auto-discovery**: job URLs parsed for ATS patterns (greenhouse/lever/ashby) after each scrape run; new companies inserted automatically
@@ -44,7 +44,9 @@ roleminer/
 ├── registry/
 │   ├── db.py              # SQLite CRUD + cleanup_stale_runs + users/profiles + get_jobs_for_profile
 │   ├── vector_store.py    # ChromaDB: companies + jobs collections
-│   ├── ats_detect.py      # ATS detect + embedded careers URLs in HTML
+│   ├── ats_detect.py      # ATS detect + embedded careers URLs in HTML (+ SmartRecruiters)
+│   ├── job_api_discover.py # proprietary job JSON API discovery from JS chunks (+ careers.* fallback)
+│   ├── browser_detect.py  # Playwright ATS fallback (network + DOM + hrefs)
 │   └── career_finder.py   # 4-step career URL discovery (cache→heuristic→search→LLM)
 ├── pipeline/
 │   ├── embedder.py        # OpenRouter embed client + embed_batched()
@@ -60,7 +62,7 @@ roleminer/
         ├── jobs.py        # GET /jobs/latest|run|tracked, POST /jobs/status|click
         ├── users.py       # GET/POST /users, GET /me
         ├── preferences.py # profile + resume + settings
-        ├── companies.py   # GET /companies + POST /companies/discover (SSE)
+        ├── companies.py   # GET /companies + POST /companies/discover (SSE) + POST /companies/{id}/scrape
         ├── runs.py        # run management + trigger
         ├── stats.py
         └── stream.py      # SSE pipeline event stream
@@ -83,11 +85,12 @@ Every step emits structured events to SQLite + SSE queue:
 | `scraper_done` | After each company | `jobs_fetched`, `duration_ms`, `error` |
 | `scraper_skipped` | Company is fresh | `last_scraped_hours_ago`, `freshness_hours` |
 | `discover_done` | After URL auto-discovery | `new_companies`, `names[]` |
-| `filter_done` | After rule filter | `total_in/out`, `dropped_*` counts |
-| `role_filter_done` | After role filter | `total_in/out`, `dropped`, `sample_dropped[]` |
+| `dedup_done` | After dedup by URL (post-scrape) | `total_in`, `total_out`, `removed`, `jobs` `{total, truncated, items[]}` |
+| `filter_done` | After rule filter | `total_in/out`, `dropped_*`, `sample_dropped[]`, `jobs_passed` snapshot |
+| `role_filter_done` | After role filter | `total_in/out`, `dropped`, `sample_dropped[]` (incl. `url`), `jobs_passed` snapshot |
 | `embed_done` | After ChromaDB upsert | `jobs_embedded`, `model` |
-| `rank_done` | After ranking | `total_ranked`, `top_scores[]`, `sent_to_scorer` |
-| `score_done` | After LLM scoring | `jobs_scored`, `tokens_used`, `cost_usd`, `score_distribution` |
+| `rank_done` | After ranking | `total_ranked`, `top_scores[]`, `sent_to_scorer`, `jobs_ranked` (incl. `rank_score`) |
+| `score_done` | After LLM scoring | `jobs_scored`, `tokens_used`, `cost_usd`, `score_distribution`, `top_jobs`, `jobs_scored_detail` |
 | `error` | On any exception | `step`, `company`, `error`, `traceback` |
 
 ## Config env vars

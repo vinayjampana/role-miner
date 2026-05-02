@@ -170,6 +170,10 @@ export const api = {
   trigger: () => j<{ run_id: number }>(authFetch("/api/trigger", { method: "POST" })),
   stats: () => j<any>(authFetch("/api/stats")),
   companies: () => j<Company[]>(authFetch("/api/companies")),
+  scrapeCompany: (id: number) =>
+    j<{ run_id: number }>(
+      authFetch(`/api/companies/${id}/scrape`, { method: "POST" })
+    ),
 
   getProfile: () => j<SearchProfile>(authFetch("/api/profile")),
   putProfile: (body: SearchProfile) =>

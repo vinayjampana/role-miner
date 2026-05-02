@@ -29,7 +29,7 @@ def _detect_work_mode(title: str, content: str) -> str:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
 async def _fetch(session: httpx.AsyncClient, url: str) -> dict:
-    resp = await session.post(url, json={"limit": 100})
+    resp = await session.get(url)
     resp.raise_for_status()
     return resp.json()
 

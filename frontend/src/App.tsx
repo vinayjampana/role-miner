@@ -85,6 +85,13 @@ function UserPicker() {
 
 function AppInner() {
   const [view, setView] = useState<"dashboard" | "tracker" | "logs" | "companies" | "settings">("dashboard");
+  const [selectRunId, setSelectRunId] = useState<number | null>(null);
+
+  const navigateToRun = (runId: number) => {
+    setSelectRunId(runId);
+    setView("logs");
+  };
+
   return (
     <div className="h-full flex flex-col">
       <nav className="bg-white border-b border-slate-200 px-4 py-2 flex items-center gap-4 flex-wrap">
@@ -139,9 +146,9 @@ function AppInner() {
         ) : view === "tracker" ? (
           <Tracker />
         ) : view === "logs" ? (
-          <RunLogs />
+          <RunLogs initialRunId={selectRunId} />
         ) : view === "companies" ? (
-          <Companies />
+          <Companies onNavigateToRun={navigateToRun} />
         ) : (
           <Settings />
         )}
