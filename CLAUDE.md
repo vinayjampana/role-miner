@@ -8,10 +8,10 @@ Personal tool for Vinay to find relevant senior engineering roles in India. Not 
 
 ## Stack
 
-- Python 3.11+ · FastAPI · SQLite · ChromaDB · HTTPX · Playwright
-- React 18 · Vite · TypeScript · Zustand · React Query · Recharts
+- Python 3.11+ · FastAPI · SQLite · HTTPX · scikit-learn (TF-IDF)
+- React 18 · Vite · TypeScript · React Query · Recharts · Tailwind
 - Docker Compose (local + VPS deploy)
-- LLM: DeepSeek or GPT-4o-mini (scoring only) · text-embedding-3-small (embeddings)
+- LLM: any OpenAI-compatible API via `LLM_API_KEY` + `LLM_BASE_URL` env vars
 
 ## Key Constraints
 
@@ -23,6 +23,8 @@ Personal tool for Vinay to find relevant senior engineering roles in India. Not 
 - **Service company filter is rule-based**, not LLM
 - **Single LLM call per run** — batch score top 50 jobs, structured JSON output
 - All scrapers return same `Job` dataclass — decoupled from pipeline
+- **LLM config via env**: `LLM_API_KEY`, `LLM_BASE_URL`, `SCORING_MODEL` — no hardcoded provider
+- **run_events table**: every pipeline step logged to SQLite with timing + errors — drives SSE stream and RunLogs UI
 
 ## Directory Layout
 
@@ -42,12 +44,16 @@ roleminer/
 ## Running Locally
 
 ```bash
-# Phase 1 (core pipeline)
-python main.py bootstrap    # seed company registry
+# CLI only
+python main.py bootstrap    # seed company registry (run once)
 python main.py run          # scrape → filter → score → output JSON
+python main.py serve        # start FastAPI on :8000
 
-# Phase 4 (with API + frontend)
-docker compose up
+# Full stack (API + frontend)
+docker compose up           # API on :8000, frontend on :3000
+
+# Frontend dev mode
+cd frontend && npm run dev  # proxies /api → localhost:8000
 ```
 
 ## Testing Convention
