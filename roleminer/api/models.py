@@ -57,3 +57,36 @@ class StatsOut(BaseModel):
 
 class TriggerResponse(BaseModel):
     run_id: int
+
+
+class DiscoverRequest(BaseModel):
+    names: list[str]
+
+
+class DiscoverResult(BaseModel):
+    name: str
+    found: bool
+    careers_url: str | None = None
+    ats_type: str | None = None
+    ats_slug: str | None = None
+    domain: str | None = None
+    method: str  # cache | heuristic | search | llm | failed
+    already_in_db: bool = False
+    company_id: int | None = None
+
+
+class CompanyOut(BaseModel):
+    id: int
+    name: str
+    domain: str | None = None
+    ats_type: str | None = None
+    careers_url: str | None = None
+    ats_slug: str | None = None
+    tech_stack: list[str] = Field(default_factory=list)
+    location: str | None = None
+    hq_city: str | None = None
+    size_category: str | None = None
+    company_type: str | None = None
+    funding_stage: str | None = None
+    last_scraped_at: str | None = None
+    embedding_id: str | None = None

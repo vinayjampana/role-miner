@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Companies } from "./views/Companies";
 import { Dashboard } from "./views/Dashboard";
 import { RunLogs } from "./views/RunLogs";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false } } });
 
 export default function App() {
-  const [view, setView] = useState<"dashboard" | "logs">("dashboard");
+  const [view, setView] = useState<"dashboard" | "logs" | "companies">("dashboard");
   return (
     <QueryClientProvider client={qc}>
       <div className="h-full flex flex-col">
@@ -29,10 +30,18 @@ export default function App() {
             >
               Run Logs
             </button>
+            <button
+              onClick={() => setView("companies")}
+              className={`px-3 py-1 rounded text-sm ${
+                view === "companies" ? "bg-slate-900 text-white" : "hover:bg-slate-100"
+              }`}
+            >
+              Companies
+            </button>
           </div>
         </nav>
         <div className="flex-1 overflow-hidden">
-          {view === "dashboard" ? <Dashboard /> : <RunLogs />}
+          {view === "dashboard" ? <Dashboard /> : view === "logs" ? <RunLogs /> : <Companies />}
         </div>
       </div>
     </QueryClientProvider>

@@ -4,14 +4,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import logging
+
 import config
-from roleminer.registry.db import init_db
-from roleminer.api.routes import jobs, runs, stats, stream
+from roleminer.registry.db import init_db, cleanup_stale_runs
+from roleminer.api.routes import companies, jobs, runs, stats, stream
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     conn = init_db(config.DB_PATH)
+    fixed = cleanup_stale_runs(conn)
+    if fixed:
+        logger.warning("Startup: marked %d stale 'running' runs as 'failed'", fixed)
     conn.close()
     yield
 
@@ -26,6 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(jobs.router)
+app.include_router(companies.router)
 app.include_router(runs.router)
 app.include_router(stream.router)
 app.include_router(stats.router)

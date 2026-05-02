@@ -222,7 +222,7 @@ SEED_COMPANIES: list[dict] = [
 def init_db(db_path: Path) -> sqlite3.Connection:
     """Initialise SQLite database and return connection."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_DDL_COMPANIES)
@@ -284,6 +284,20 @@ def update_last_scraped(conn: sqlite3.Connection, company_id: int) -> None:
         "UPDATE companies SET last_scraped_at = ? WHERE id = ?",
         (now, company_id),
     )
+    conn.commit()
+
+
+def cleanup_stale_runs(conn: sqlite3.Connection) -> int:
+    """Mark runs stuck in 'running' as 'failed'. Returns count fixed."""
+    cur = conn.execute(
+        "UPDATE runs SET status = 'failed' WHERE status = 'running'"
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def update_company_embedding_id(conn: sqlite3.Connection, company_id: int, embedding_id: str) -> None:
+    conn.execute("UPDATE companies SET embedding_id = ? WHERE id = ?", (embedding_id, company_id))
     conn.commit()
 
 
