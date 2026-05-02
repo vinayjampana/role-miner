@@ -102,10 +102,12 @@ async def score_jobs(
     if not jobs:
         return [], 0, 0.0
 
-    batch = jobs[:50]
+    # deepseek-v4-flash is a reasoning model — burns ~2000 reasoning tokens per batch.
+    # 15 jobs per chunk keeps total completion tokens safely under 16k.
+    CHUNK_SIZE = 15
+    top_jobs = jobs[:50]
 
     effective_key = api_key or os.getenv("LLM_API_KEY", "")
-
     client_kwargs: dict[str, Any] = {"api_key": effective_key or "sk-placeholder"}
     base_url = os.getenv("LLM_BASE_URL", "")
     if base_url:
@@ -113,55 +115,58 @@ async def score_jobs(
 
     client = AsyncOpenAI(**client_kwargs)
 
-    user_prompt = _build_user_prompt(batch, profile, resume_summary)
+    all_scored: list[ScoredJob] = []
+    total_tokens = 0
+    total_cost = 0.0
 
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-            max_tokens=4000,  # reasoning models need room for think + JSON output
-        )
-    except Exception as exc:
-        logger.error("LLM scoring failed: %s", exc)
-        return [ScoredJob.from_job(j) for j in batch], 0, 0.0
+    for chunk_start in range(0, len(top_jobs), CHUNK_SIZE):
+        chunk = top_jobs[chunk_start:chunk_start + CHUNK_SIZE]
+        user_prompt = _build_user_prompt(chunk, profile, resume_summary)
 
-    usage = response.usage
-    tokens_used = (usage.prompt_tokens + usage.completion_tokens) if usage else 0
-    input_tokens = usage.prompt_tokens if usage else 0
-    output_tokens = usage.completion_tokens if usage else 0
-    cost_usd = input_tokens * _INPUT_COST_PER_TOKEN + output_tokens * _OUTPUT_COST_PER_TOKEN
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=16000,
+            )
+        except Exception as exc:
+            logger.error("LLM scoring failed (chunk %d): %s", chunk_start, exc)
+            all_scored.extend(ScoredJob.from_job(j) for j in chunk)
+            continue
 
-    raw_text = response.choices[0].message.content or ""
-    scored_raw = _extract_json(raw_text)
+        usage = response.usage
+        tokens_used = (usage.prompt_tokens + usage.completion_tokens) if usage else 0
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        total_tokens += tokens_used
+        total_cost += input_tokens * _INPUT_COST_PER_TOKEN + output_tokens * _OUTPUT_COST_PER_TOKEN
 
-    if not scored_raw:
-        logger.warning("Failed to parse LLM JSON response — assigning score 0 to all")
-        return [ScoredJob.from_job(j) for j in batch], tokens_used, cost_usd
+        raw_text = response.choices[0].message.content or ""
+        scored_raw = _extract_json(raw_text)
 
-    # Build id → result map (LLM uses 1-based ids)
-    score_map: dict[int, dict] = {}
-    for item in scored_raw:
-        if isinstance(item, dict) and "id" in item:
-            score_map[int(item["id"])] = item
+        if not scored_raw:
+            logger.warning("Failed to parse LLM JSON for chunk at %d — scoring 0", chunk_start)
+            all_scored.extend(ScoredJob.from_job(j) for j in chunk)
+            continue
 
-    scored_jobs: list[ScoredJob] = []
-    for idx, job in enumerate(batch, start=1):
-        llm_result = score_map.get(idx, {})
-        score = int(llm_result.get("score", 0))
-        reason = str(llm_result.get("reason", ""))
-        skill_gap = {
-            "have": llm_result.get("have", []),
-            "need": llm_result.get("need", []),
-            "gap": llm_result.get("gap", []),
-        }
-        scored_jobs.append(ScoredJob.from_job(job, score=score, reason=reason, skill_gap=skill_gap))
+        score_map: dict[int, dict] = {int(item["id"]): item for item in scored_raw if isinstance(item, dict) and "id" in item}
 
-    logger.info(
-        "Scored %d jobs | tokens=%d | cost=$%.6f",
-        len(scored_jobs), tokens_used, cost_usd,
-    )
-    return scored_jobs, tokens_used, cost_usd
+        for idx, job in enumerate(chunk, start=1):
+            llm_result = score_map.get(idx, {})
+            all_scored.append(ScoredJob.from_job(
+                job,
+                score=int(llm_result.get("score", 0)),
+                reason=str(llm_result.get("reason", "")),
+                skill_gap={
+                    "have": llm_result.get("have", []),
+                    "need": llm_result.get("need", []),
+                    "gap": llm_result.get("gap", []),
+                },
+            ))
+
+    logger.info("Scored %d jobs | tokens=%d | cost=$%.6f", len(all_scored), total_tokens, total_cost)
+    return all_scored, total_tokens, total_cost

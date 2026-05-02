@@ -9,6 +9,27 @@ logger = logging.getLogger(__name__)
 
 ESOP_PATTERNS = [r"\besop\b", r"\bequity\b", r"\bstock options\b", r"\brsus?\b"]
 
+# City aliases — Greenhouse/Lever often use official names that differ from common ones
+_LOCATION_ALIASES: dict[str, str] = {
+    "bengaluru": "bangalore",
+    "bengaluru-vtp": "bangalore",
+    "new delhi": "ncr",
+    "delhi": "ncr",
+    "gurgaon": "ncr",
+    "gurugram": "ncr",
+    "noida": "ncr",
+    "mumbai": "mumbai",
+    "bombay": "mumbai",
+}
+
+def _normalize_location(loc: str) -> str:
+    """Map ATS location strings to canonical city names used in profile."""
+    lower = loc.lower()
+    for alias, canonical in _LOCATION_ALIASES.items():
+        if alias in lower:
+            lower = lower.replace(alias, canonical)
+    return lower
+
 _IMMEDIATE_PATTERNS = [
     r"\bimmediate\s+joiner\b",
     r"\bimmediate\s+join\b",
@@ -140,13 +161,14 @@ def filter_jobs(jobs: list[Job], profile: dict) -> list[Job]:
         job.notice_compatible = detect_notice_compatible(job.jd_text, notice_days)
 
         # --- Rule 1: Freshness ---
+        # 30 days: ATS boards don't re-timestamp jobs weekly; 7d kills too much
         age = days_since(job.date_posted)
-        if age > 7:
+        if age > 30:
             logger.debug("Filtered (stale %.1f days): %s @ %s", age, job.title, job.company)
             continue
 
         # --- Rule 2: Location ---
-        job_loc_lower = job.location.lower()
+        job_loc_lower = _normalize_location(job.location)
         work_mode_lower = job.work_mode.lower()
 
         location_match = any(loc in job_loc_lower for loc in profile_locations if loc)

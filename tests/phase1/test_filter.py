@@ -32,8 +32,8 @@ _BASE_PROFILE = {
 
 
 def test_stale_job_filtered_out():
-    """Job posted more than 7 days ago is filtered out."""
-    old_date = (datetime.now(tz=timezone.utc) - timedelta(days=10)).isoformat()
+    """Job posted more than 30 days ago is filtered out."""
+    old_date = (datetime.now(tz=timezone.utc) - timedelta(days=45)).isoformat()
     job = _make_job(date_posted=old_date)
     result = filter_jobs([job], _BASE_PROFILE)
     assert result == []
@@ -101,7 +101,7 @@ def test_multiple_jobs_mixed():
     good = _make_job(url="https://example.com/good")
     stale = _make_job(
         url="https://example.com/stale",
-        date_posted=(datetime.now(tz=timezone.utc) - timedelta(days=10)).isoformat(),
+        date_posted=(datetime.now(tz=timezone.utc) - timedelta(days=45)).isoformat(),
     )
     wrong_loc = _make_job(url="https://example.com/wrong_loc", location="New York, USA", work_mode="onsite")
 
