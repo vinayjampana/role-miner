@@ -17,6 +17,7 @@ SEARCH_PROFILE = ROOT / "search_profile.yaml"
 RESUME_PDF = ROOT / "resume.pdf"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")  # e.g. https://opencode.ai/zen/v1
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 SCORING_MODEL = os.getenv("SCORING_MODEL", "gpt-4o-mini")
 PROXY_URL = os.getenv("PROXY_URL", "")
