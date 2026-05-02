@@ -20,6 +20,8 @@ class JobOut(BaseModel):
     score: int = 0
     reason: str = ""
     skill_gap: dict = Field(default_factory=lambda: {"have": [], "need": [], "gap": []})
+    tracker_status: str = "new"
+    tracker_notes: str = ""
 
 
 class RunSummary(BaseModel):
@@ -126,6 +128,33 @@ class RuntimeSettingsUpdate(BaseModel):
 class ResumeInfoOut(BaseModel):
     has_pdf: bool
     path: str
+
+
+class UserOut(BaseModel):
+    id: int
+    name: str
+    email: str | None = None
+    active_profile_id: int | None = None
+
+
+class UserCreate(BaseModel):
+    name: str
+    email: str | None = None
+
+
+class MeOut(BaseModel):
+    user: UserOut
+    profile: SearchProfileOut | None = None
+
+
+class JobStatusUpdate(BaseModel):
+    url: str
+    status: str
+    notes: str | None = None
+
+
+class JobClickBody(BaseModel):
+    url: str
 
 
 class CompanyOut(BaseModel):

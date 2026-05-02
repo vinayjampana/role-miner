@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { streamUserQuery } from "../auth/userStore";
 import { formatEventLogTime } from "../lib/datetime";
 
 export interface StreamEvent {
@@ -16,7 +17,7 @@ export function useRunStream(runId: number | null) {
     if (runId == null) return;
     setEvents([]);
     setDone(false);
-    const es = new EventSource(`/api/stream/${runId}`);
+    const es = new EventSource(`/api/stream/${runId}?${streamUserQuery()}`);
     es.onmessage = (msg) => {
       try {
         const ev = JSON.parse(msg.data) as StreamEvent;

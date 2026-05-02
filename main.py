@@ -10,7 +10,6 @@ Usage:
 import asyncio
 import json
 import logging
-import re
 import sqlite3
 import sys
 import time
@@ -21,9 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import yaml
-
 import config
+from roleminer.registry.ats_detect import detect_ats_from_url, find_embedded_ats_url
 from roleminer.registry.db import (
     init_db,
     insert_company,
@@ -32,7 +30,15 @@ from roleminer.registry.db import (
     insert_run_event,
     update_run,
     update_last_scraped,
+    clear_scrape_freshness,
+    update_company_fields,
     update_company_embedding_id,
+    upsert_job,
+    replace_job_runs_for_run,
+    update_job_runs_scores,
+    ensure_default_user_id,
+    get_active_profile_for_user,
+    search_profile_row_to_pipeline_dict,
     SEED_COMPANIES,
 )
 from roleminer.registry import vector_store
@@ -55,20 +61,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger("roleminer.main")
 
-_ATS_PATTERNS = [
-    (re.compile(r"boards\.greenhouse\.io/([^/?#]+)"), "greenhouse"),
-    (re.compile(r"jobs\.lever\.co/([^/?#]+)"), "lever"),
-    (re.compile(r"jobs\.ashbyhq\.com/([^/?#]+)"), "ashby"),
-]
 
-
-def detect_ats_from_url(url: str) -> tuple[str, str] | None:
-    """Return (ats_type, slug) from a job URL, or None if unrecognised."""
-    for pattern, ats_type in _ATS_PATTERNS:
-        m = pattern.search(url or "")
-        if m:
-            return ats_type, m.group(1)
-    return None
+async def _resolve_careers_to_ats_url(session, careers_url: str) -> tuple[str, tuple[str, str] | None]:
+    """
+    GET the careers page (follow redirects). If the response URL is not an ATS board,
+    scan HTML for embedded board URLs (iframe / links / JSON).
+    Returns (url_to_use_for_detection, detect_ats_from_url result or None).
+    """
+    u = (careers_url or "").strip()
+    if not u:
+        logger.info("[careers-resolve] empty input — skip")
+        return u, None
+    logger.info("[careers-resolve] step=fetch url=%s", u)
+    try:
+        r = await session.get(u, follow_redirects=True, timeout=25.0)
+        final = str(r.url)
+        logger.info(
+            "[careers-resolve] step=http status=%s final_url=%s (redirected=%s)",
+            r.status_code,
+            final,
+            "yes" if final.rstrip("/") != u.rstrip("/") else "no",
+        )
+        if r.status_code >= 400:
+            det = detect_ats_from_url(u)
+            logger.info("[careers-resolve] step=detect(bad_status) on original url → %s", det)
+            return u, det
+        det = detect_ats_from_url(final)
+        logger.info("[careers-resolve] step=detect(final_url) → %s", det)
+        if det:
+            return final, det
+        html_len = len(r.text or "")
+        logger.info("[careers-resolve] step=html_scan body_bytes=%s (no ATS in location bar)", html_len)
+        embedded = find_embedded_ats_url(r.text)
+        if embedded:
+            det2 = detect_ats_from_url(embedded)
+            logger.info(
+                "[careers-resolve] step=embedded found=%s detect → %s",
+                embedded,
+                det2,
+            )
+            return embedded, det2
+        logger.info("[careers-resolve] step=embedded none — corporate page had no board URL in HTML")
+        return final, None
+    except Exception as exc:
+        logger.warning("[careers-resolve] step=error %s — fallback detect on original url", exc)
+        det = detect_ats_from_url(u)
+        logger.info("[careers-resolve] step=detect(fallback) → %s", det)
+        return u, det
 
 
 # ---------------------------------------------------------------------------
@@ -118,40 +157,110 @@ async def bootstrap() -> None:
 # Pipeline helpers
 # ---------------------------------------------------------------------------
 
-def _load_profile() -> dict:
-    with open(config.SEARCH_PROFILE, "r") as fh:
-        return yaml.safe_load(fh)
-
-
-async def _scrape_company(company: dict, session, profile: dict) -> list[Job]:
+async def _scrape_company(
+    company: dict,
+    session,
+    profile: dict,
+    conn: sqlite3.Connection | None = None,
+) -> list[Job]:
     """Scrape one company, returning jobs. Errors are caught and logged."""
-    ats_type = company.get("ats_type", "")
-    slug = company.get("ats_slug", "")
+    ats_type = (company.get("ats_type") or "").strip()
+    slug = (company.get("ats_slug") or "").strip()
     name = company.get("name", "")
-    careers_url = company.get("careers_url", "")
+    careers_url = (company.get("careers_url") or "").strip()
+    cid = company.get("id")
+
+    logger.info(
+        "[scrape] company=%r id=%s initial ats_type=%r ats_slug=%r careers_url=%s",
+        name,
+        cid,
+        ats_type,
+        slug,
+        careers_url or "(none)",
+    )
+
+    det: tuple[str, str] | None = None
+    needs_resolve = bool(
+        careers_url
+        and (
+            ats_type in ("", "custom")
+            or (ats_type in ("greenhouse", "lever", "ashby") and not slug)
+        )
+    )
+    if needs_resolve:
+        logger.info(
+            "[scrape] company=%r step=careers_resolve reason=%s",
+            name,
+            "custom_or_empty_ats" if ats_type in ("", "custom") else "missing_slug_for_known_ats",
+        )
+        resolved, det = await _resolve_careers_to_ats_url(session, careers_url)
+        if det:
+            ats_type, slug = det[0], (det[1] or "").strip()
+            careers_url = resolved
+        elif resolved != careers_url:
+            careers_url = resolved
+        logger.info(
+            "[scrape] company=%r step=after_resolve ats_type=%r ats_slug=%r careers_url=%s det=%s",
+            name,
+            ats_type,
+            slug,
+            careers_url or "(none)",
+            det,
+        )
+    else:
+        logger.info(
+            "[scrape] company=%r step=careers_resolve skipped (have slug or no careers_url for resolve)",
+            name,
+        )
+
+    if conn and cid and det:
+        patch: dict = {}
+        if ats_type and ats_type != company.get("ats_type"):
+            patch["ats_type"] = ats_type
+        if slug and slug != (company.get("ats_slug") or ""):
+            patch["ats_slug"] = slug
+        new_cu = (careers_url or "").strip()
+        if new_cu and new_cu != (company.get("careers_url") or "").strip():
+            patch["careers_url"] = new_cu
+        if patch:
+            logger.info("[scrape] company=%r step=db_patch %s", name, patch)
+            update_company_fields(conn, cid, patch)
+            company.update(patch)
+        else:
+            logger.info("[scrape] company=%r step=db_patch none (already in sync)", name)
+    elif conn and cid and not det:
+        logger.info("[scrape] company=%r step=db_patch skipped (no new ATS from resolve)", name)
 
     if not slug and ats_type not in ("workday", "cutshort"):
-        logger.warning("Company '%s' has no ats_slug — skipping", name)
+        logger.warning(
+            "[scrape] company=%r step=abort reason=no_ats_slug ats_type=%r careers_url=%s",
+            name,
+            ats_type,
+            careers_url or "(none)",
+        )
         return []
 
     try:
+        logger.info("[scrape] company=%r step=call_scraper ats=%r slug=%r workday_url=%s", name, ats_type, slug, careers_url if ats_type == "workday" else "—")
         if ats_type == "greenhouse":
-            return await greenhouse.scrape(slug, session, company_name=name)
+            jobs = await greenhouse.scrape(slug, session, company_name=name)
         elif ats_type == "lever":
-            return await lever.scrape(slug, session, company_name=name)
+            jobs = await lever.scrape(slug, session, company_name=name)
         elif ats_type == "ashby":
-            return await ashby.scrape(slug, session, company_name=name)
+            jobs = await ashby.scrape(slug, session, company_name=name)
         elif ats_type == "workday":
-            return await workday.scrape(careers_url, session, company_name=name)
+            jobs = await workday.scrape(careers_url, session, company_name=name)
         elif ats_type == "cutshort":
             skills = profile.get("skills", [])
             locations = profile.get("locations", [])
-            return await cutshort.scrape(skills, locations, session)
+            jobs = await cutshort.scrape(skills, locations, session)
         else:
-            logger.warning("Unknown ats_type '%s' for %s — skipping", ats_type, name)
+            logger.warning("[scrape] company=%r step=abort unknown ats_type=%r", name, ats_type)
             return []
+        logger.info("[scrape] company=%r step=done jobs_fetched=%s", name, len(jobs))
+        return jobs
     except Exception as exc:
-        logger.error("Error scraping %s (%s/%s): %s", name, ats_type, slug, exc)
+        logger.error("[scrape] company=%r step=error ats=%r slug=%r: %s", name, ats_type, slug, exc)
         return []
 
 
@@ -176,12 +285,20 @@ async def run_pipeline(
     conn: sqlite3.Connection,
     profile: dict,
     run_id: int,
+    user_id: int | None = None,
     event_queue: Optional[asyncio.Queue] = None,
 ) -> dict:
     """Full pipeline. Logs structured events to DB (and queue if provided)."""
     started = time.time()
+    if user_id is not None:
+        logger.info("run_pipeline run_id=%s user_id=%s", run_id, user_id)
     resume_summary = profile.get("resume_summary", "")
     companies = get_all_companies(conn)
+    logger.info(
+        "[pipeline] run_id=%s scrape phase: companies_in_registry=%d (Cutshort + each row)",
+        run_id,
+        len(companies),
+    )
 
     all_jobs: list[Job] = []
 
@@ -233,6 +350,12 @@ async def run_pipeline(
                         hours_ago = (datetime.now(tz=timezone.utc) - last_dt).total_seconds() / 3600
                         if hours_ago < freshness_hours:
                             skipped_fresh.append(company.get("name", ""))
+                            logger.info(
+                                "[scrape] company=%r step=skipped_fresh last_scraped_hours_ago=%.1f freshness_hours=%s",
+                                company.get("name"),
+                                hours_ago,
+                                freshness_hours,
+                            )
                             await _emit(conn, run_id, "scraper_skipped", {
                                 "company": company.get("name"),
                                 "ats": company.get("ats_type"),
@@ -249,7 +372,7 @@ async def run_pipeline(
                 }, source=company.get("name", ""), queue=event_queue)
                 err = None
                 try:
-                    jobs = await _scrape_company(company, session, profile)
+                    jobs = await _scrape_company(company, session, profile, conn)
                 except Exception as exc:
                     jobs = []
                     err = str(exc)
@@ -274,24 +397,53 @@ async def run_pipeline(
         existing_names = {c["name"].lower() for c in get_all_companies(conn)}
         discovered: list[dict] = []
         seen_new: set[str] = set()
+        pd_skip_existing = pd_skip_dup = pd_skip_not_ats = pd_skip_no_name = 0
         for job in all_jobs:
             name_lower = (job.company or "").lower().strip()
-            if not name_lower or name_lower in existing_names or name_lower in seen_new:
+            if not name_lower:
+                pd_skip_no_name += 1
+                continue
+            if name_lower in existing_names:
+                pd_skip_existing += 1
+                continue
+            if name_lower in seen_new:
+                pd_skip_dup += 1
                 continue
             result = detect_ats_from_url(job.url or "")
-            if result:
-                ats_type, slug = result
-                new_co = {
-                    "name": job.company,
-                    "ats_type": ats_type,
-                    "ats_slug": slug,
-                    "company_type": job.company_type or "product",
-                }
-                row_id = insert_company(conn, new_co)
-                new_co["id"] = row_id
-                discovered.append(new_co)
-                seen_new.add(name_lower)
-                logger.info("Discovered new company: %s (%s/%s)", job.company, ats_type, slug)
+            if not result:
+                pd_skip_not_ats += 1
+                continue
+            ats_type, slug = result
+            new_co: dict = {
+                "name": job.company,
+                "ats_type": ats_type,
+                "ats_slug": slug,
+                "company_type": job.company_type or "product",
+            }
+            if ats_type == "workday" and "/wday/cxs/" in (job.url or ""):
+                new_co["careers_url"] = job.url.split("?")[0]
+            row_id = insert_company(conn, new_co)
+            new_co["id"] = row_id
+            discovered.append(new_co)
+            seen_new.add(name_lower)
+            logger.info(
+                "[pipeline-discover] insert company=%r ats=%s/%s job_url=%s db_id=%s careers_url=%s",
+                job.company,
+                ats_type,
+                slug,
+                job.url,
+                row_id,
+                new_co.get("careers_url") or "(none)",
+            )
+        logger.info(
+            "[pipeline-discover] summary jobs_scanned=%d new_companies=%d skip_no_name=%d skip_in_registry=%d skip_dup_run=%d skip_url_not_ats=%d",
+            len(all_jobs),
+            len(discovered),
+            pd_skip_no_name,
+            pd_skip_existing,
+            pd_skip_dup,
+            pd_skip_not_ats,
+        )
         await _emit(conn, run_id, "discover_done", {
             "new_companies": len(discovered),
             "names": [c["name"] for c in discovered],
@@ -374,6 +526,9 @@ async def run_pipeline(
             "sample_dropped": role_dropped[:5],
         }, queue=event_queue)
 
+        for job in passed:
+            upsert_job(conn, asdict(job))
+
         # Embed + persist all filter-passing jobs to ChromaDB
         if embedder.is_available() and passed:
             try:
@@ -390,6 +545,7 @@ async def run_pipeline(
 
         # Rank
         ranked, rank_scores = rank_jobs(passed, profile, resume_summary)
+        replace_job_runs_for_run(conn, run_id, [asdict(j) for j in ranked], rank_scores)
         await _emit(conn, run_id, "rank_done", {
             "total_ranked": len(ranked),
             "top_scores": [round(s, 4) for s in rank_scores[:10]],
@@ -407,6 +563,7 @@ async def run_pipeline(
             model=model, api_key=api_key,
         )
         scored.sort(key=lambda j: j.score, reverse=True)
+        update_job_runs_scores(conn, run_id, [asdict(j) for j in scored])
 
         # Score distribution
         dist = {"0-3": 0, "4-6": 0, "7-10": 0}
@@ -482,16 +639,56 @@ async def run_pipeline(
         raise
 
 
+def reset_scrape_freshness_cli() -> None:
+    """Clear per-company last_scraped_at so the next pipeline run scrapes all companies."""
+    conn = init_db(config.DB_PATH)
+    try:
+        n = clear_scrape_freshness(conn)
+        logger.info("Cleared last_scraped_at on %d companies — next run will scrape all (ignores freshness window).", n)
+    finally:
+        conn.close()
+
+
 async def run() -> None:
     """CLI entry — full pipeline."""
-    profile = _load_profile()
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python main.py run")
+    parser.add_argument("--user", type=str, default=None, help="User name (default: user id 1)")
+    args = parser.parse_args(sys.argv[2:] if len(sys.argv) > 2 else [])
+
     conn = init_db(config.DB_PATH)
-    run_id = insert_run(conn, {
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-        "status": "running",
-    })
     try:
-        summary = await run_pipeline(conn, profile, run_id, event_queue=None)
+        if args.user:
+            row = conn.execute(
+                "SELECT id, active_profile_id FROM users WHERE name = ?",
+                (args.user.strip(),),
+            ).fetchone()
+            if not row:
+                logger.error("Unknown user: %s", args.user)
+                sys.exit(1)
+            uid = int(row["id"])
+            apid = row["active_profile_id"]
+        else:
+            uid = ensure_default_user_id(conn)
+            _, pr = get_active_profile_for_user(conn, uid)
+            apid = pr["id"] if pr else None
+        if not apid:
+            logger.error("User has no active profile")
+            sys.exit(1)
+        prow = conn.execute("SELECT * FROM search_profiles WHERE id = ?", (int(apid),)).fetchone()
+        if not prow:
+            logger.error("Profile row missing")
+            sys.exit(1)
+        profile = search_profile_row_to_pipeline_dict(dict(prow))
+
+        run_id = insert_run(conn, {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "status": "running",
+            "user_id": uid,
+            "search_profile_id": int(apid),
+        })
+        summary = await run_pipeline(conn, profile, run_id, user_id=uid, event_queue=None)
         logger.info("Run complete: %s", summary)
     finally:
         conn.close()
@@ -511,13 +708,25 @@ def serve() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if len(sys.argv) < 2:
+        print(
+            "Usage: python main.py bootstrap | run | serve | reset-scrape\n"
+            "  bootstrap    — seed company registry\n"
+            "  run            — scrape → rank → score (CLI pipeline)\n"
+            "  serve          — FastAPI only (no scrape on start)\n"
+            "  reset-scrape   — clear last_scraped_at on all companies (re-scrape everything next run)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    cmd = sys.argv[1]
     if cmd == "bootstrap":
         asyncio.run(bootstrap())
     elif cmd == "run":
         asyncio.run(run())
     elif cmd == "serve":
         serve()
+    elif cmd == "reset-scrape":
+        reset_scrape_freshness_cli()
     else:
-        print(f"Unknown command: {cmd}. Use: bootstrap | run | serve")
+        print(f"Unknown command: {cmd}. Use: bootstrap | run | serve | reset-scrape", file=sys.stderr)
         sys.exit(1)

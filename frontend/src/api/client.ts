@@ -1,3 +1,5 @@
+import { authFetch } from "../auth/userStore";
+
 export interface Job {
   title: string;
   company: string;
@@ -15,6 +17,8 @@ export interface Job {
   score: number;
   reason: string;
   skill_gap: { have: string[]; need: string[]; gap: string[] };
+  tracker_status?: string;
+  tracker_notes?: string;
 }
 
 export interface RunSummary {
@@ -122,34 +126,74 @@ export interface ResumeInfo {
   path: string;
 }
 
-export const api = {
-  latestJobs: () => j<Job[]>(fetch("/api/jobs/latest")),
-  jobsForRun: (id: number) => j<Job[]>(fetch(`/api/jobs/run/${id}`)),
-  listRuns: () => j<RunSummary[]>(fetch("/api/runs")),
-  runDetail: (id: number) => j<RunDetail>(fetch(`/api/runs/${id}`)),
-  trigger: () => j<{ run_id: number }>(fetch("/api/trigger", { method: "POST" })),
-  stats: () => j<any>(fetch("/api/stats")),
-  companies: () => j<Company[]>(fetch("/api/companies")),
+export interface AppUser {
+  id: number;
+  name: string;
+  email: string | null;
+  active_profile_id: number | null;
+}
 
-  getProfile: () => j<SearchProfile>(fetch("/api/profile")),
+export const api = {
+  listUsers: () => j<AppUser[]>(authFetch("/api/users")),
+  createUser: (name: string, email?: string) =>
+    j<AppUser>(
+      authFetch("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email: email || null }),
+      })
+    ),
+
+  latestJobs: (minScore = 6) =>
+    j<Job[]>(authFetch(`/api/jobs/latest?min_score=${encodeURIComponent(minScore)}`)),
+  jobsForRun: (id: number) => j<Job[]>(authFetch(`/api/jobs/run/${id}`)),
+  trackedJobs: () => j<Job[]>(authFetch("/api/jobs/tracked")),
+  setJobStatus: (url: string, status: string, notes?: string) =>
+    j<{ ok: boolean }>(
+      authFetch("/api/jobs/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, status, notes: notes ?? null }),
+      })
+    ),
+  clickJob: (url: string) =>
+    j<{ ok: boolean }>(
+      authFetch("/api/jobs/click", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      })
+    ),
+
+  listRuns: () => j<RunSummary[]>(authFetch("/api/runs")),
+  runDetail: (id: number) => j<RunDetail>(authFetch(`/api/runs/${id}`)),
+  trigger: () => j<{ run_id: number }>(authFetch("/api/trigger", { method: "POST" })),
+  stats: () => j<any>(authFetch("/api/stats")),
+  companies: () => j<Company[]>(authFetch("/api/companies")),
+
+  getProfile: () => j<SearchProfile>(authFetch("/api/profile")),
   putProfile: (body: SearchProfile) =>
-    j<SearchProfile>(fetch("/api/profile", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })),
-  getRuntimeSettings: () => j<RuntimeSettings>(fetch("/api/settings")),
+    j<SearchProfile>(
+      authFetch("/api/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    ),
+  getRuntimeSettings: () => j<RuntimeSettings>(authFetch("/api/settings")),
   patchRuntimeSettings: (patch: RuntimeSettingsPatch) =>
-    j<RuntimeSettings>(fetch("/api/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
-    })),
-  getResumeInfo: () => j<ResumeInfo>(fetch("/api/profile/resume")),
+    j<RuntimeSettings>(
+      authFetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      })
+    ),
+  getResumeInfo: () => j<ResumeInfo>(authFetch("/api/profile/resume")),
   uploadResume: async (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    const r = await fetch("/api/profile/resume", { method: "POST", body: fd });
+    const r = await authFetch("/api/profile/resume", { method: "POST", body: fd });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json() as Promise<{ ok: boolean; path: string; bytes: number }>;
   },
@@ -157,12 +201,15 @@ export const api = {
   discoverCompanies: (names: string[], onResult: (r: DiscoverResult) => void): Promise<void> => {
     return new Promise(async (resolve, reject) => {
       try {
-        const res = await fetch("/api/companies/discover", {
+        const res = await authFetch("/api/companies/discover", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ names }),
         });
-        if (!res.ok || !res.body) { reject(new Error(`HTTP ${res.status}`)); return; }
+        if (!res.ok || !res.body) {
+          reject(new Error(`HTTP ${res.status}`));
+          return;
+        }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
@@ -174,16 +221,30 @@ export const api = {
           buf = lines.pop() ?? "";
           let eventType = "message";
           for (const line of lines) {
-            if (line.startsWith("event:")) { eventType = line.slice(6).trim(); continue; }
+            if (line.startsWith("event:")) {
+              eventType = line.slice(6).trim();
+              continue;
+            }
             if (line.startsWith("data:")) {
               const data = line.slice(5).trim();
-              if (eventType === "result") { try { onResult(JSON.parse(data)); } catch {} }
-              if (eventType === "done") { resolve(); return; }
+              if (eventType === "result") {
+                try {
+                  onResult(JSON.parse(data));
+                } catch {
+                  /* ignore */
+                }
+              }
+              if (eventType === "done") {
+                resolve();
+                return;
+              }
             }
           }
         }
         resolve();
-      } catch (e) { reject(e); }
+      } catch (e) {
+        reject(e);
+      }
     });
   },
 };

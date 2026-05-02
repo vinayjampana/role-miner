@@ -7,8 +7,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from roleminer.api.dependencies import get_db
 from roleminer.api.models import CompanyOut, DiscoverRequest
-from roleminer.registry.db import get_all_companies
 from roleminer.registry.career_finder import discover_companies
+from roleminer.registry.db import get_all_companies
 
 router = APIRouter(tags=["companies"])
 
@@ -53,16 +53,10 @@ def list_companies(db: sqlite3.Connection = Depends(get_db)):
 
 @router.post("/companies/discover")
 async def discover_companies_stream(req: DiscoverRequest, db: sqlite3.Connection = Depends(get_db)):
-    """
-    Discover career URLs for company names via 4-step flow.
-    Streams SSE: one 'result' event per company, then 'done'.
-    """
-    names = [n.strip() for n in req.names if n.strip()]
-
-    async def generate():
-        results = await discover_companies(names, db)
+    async def gen():
+        results = await discover_companies(req.names, db)
         for r in results:
-            yield {"event": "result", "data": json.dumps(r)}
-        yield {"event": "done", "data": json.dumps({"total": len(results)})}
+            yield {"event": "result", "data": json.dumps(r, default=str)}
+        yield {"event": "done", "data": "{}"}
 
-    return EventSourceResponse(generate())
+    return EventSourceResponse(gen())

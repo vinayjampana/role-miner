@@ -1,81 +1,48 @@
-# =============================================================================
-# RoleMiner — Search Profile
-# Edit this file to match your background. Run: python main.py run
-# =============================================================================
+# RoleMiner — search profile (saved from UI; safe to edit by hand)
 
-# YOUR TECH STACK
-# Used in two places:
-#   1. Sent to LLM as "Stack: ..." so it knows what skills you have
-#   2. Used in TF-IDF pre-rank to score keyword overlap with job descriptions
-# Add everything you can work with — the LLM will judge fit, not just keywords.
 skills:
-  - React
-  - TypeScript
-  - Next.js
-  - Redux Toolkit
-  - Node.js
-  - REST API
-  - Nx Monorepo
-  - Vite
-  - Webpack
-  - Jest
-  - GitHub Actions
-  - CI/CD
-  - Performance optimization
-  - Design systems
-
-# WHERE YOU'LL WORK
-# A job passes if its location string contains ANY of these (case-insensitive).
-# Example: "Bangalore, Karnataka" matches "Bangalore"
-# "Remote" is special — see work_mode below.
+- React
+- TypeScript
+- Next.js
+- Redux Toolkit
+- Node.js
+- REST API
+- Nx Monorepo
+- Vite
+- Webpack
+- Jest
+- GitHub Actions
+- CI/CD
+- Performance optimization
+- Design systems
 locations:
-  - Hyderabad
-  - Bangalore
-  - Remote
-
-# MINIMUM SALARY (Lakhs Per Annum)
-# Jobs are filtered out if salary_max < this value.
-# Jobs with NO salary data are NOT filtered out (salary unknown ≠ low salary).
-# Always in LPA — never USD.
+- Hyderabad
+- Bangalore
+- Remote
 salary_min_lpa: 25
-
-# WORK MODE PREFERENCE
-# Controls two things:
-#   1. If "remote" is listed here → remote jobs pass location check regardless of city
-#   2. Passed to LLM for context
-# Options: remote | hybrid | onsite
 work_mode:
-  - remote
-  - hybrid
-  - onsite
-
-# COMPANY TYPE FILTER
-# "product" = keeps product companies, filters out IT services/outsourcing firms
-#             (TCS, Infosys, Wipro, Accenture etc. are auto-detected and dropped)
-# Keep as [product] — no IT services/staffing/consulting roles.
+- remote
+- hybrid
+- onsite
 company_type:
-  - product
-
-# COMPANIES TO ALWAYS SKIP
-# Exact name match (case-insensitive). Add companies already applied to,
-# bad experiences, or not interested in.
+- product
 exclude_companies: []
+notice_days: 30
+resume_summary: 'Senior Full Stack Engineer, 5+ years. React 18/19, TypeScript, Next.js,
+  Node.js.
 
-# YOUR NOTICE PERIOD (days)
-# Jobs with "immediate joiner" / "no notice period" in JD get flagged
-# notice_compatible=False when this value > 0. Still appear in output — just flagged.
-# Set to 0 if you can join immediately.
-notice_days: 60
-
-# YOUR RESUME SUMMARY
-# MOST IMPORTANT field for scoring quality. LLM reads this before scoring every job.
-# Write tight — years of exp, actual stack, domain, what kind of role you want.
-resume_summary: |
-  Senior Full Stack Engineer, 5+ years. React 18/19, TypeScript, Next.js, Node.js.
   Built enterprise B2B SaaS at Zotok.ai: Nx monorepo migration (80K+ LOC, 3 apps),
+
   40+ component design system adopted by 15+ engineers, JS bundle 9MB→5MB, full
+
   GitHub Actions CI/CD pipeline. Strong in frontend architecture, performance,
+
   and design systems. Backend-capable: REST APIs, RBAC, service architecture in Node.js.
+
   Target: Senior Frontend Engineer / SDE2 / SDE3 at product companies.
+
   Hyderabad or Bangalore or Remote. ESOP preferred. No pure MAANG (DSA-heavy).
+
   Notice: 60 days (negotiable to 30).
+
+  '

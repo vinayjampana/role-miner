@@ -8,9 +8,13 @@ from roleminer.registry.db import (
     get_all_companies,
     get_companies_by_ats,
     update_last_scraped,
+    clear_scrape_freshness,
+    update_company_fields,
     delete_company,
     insert_run,
     get_run_history,
+    get_jobs_for_profile,
+    upsert_job,
 )
 
 
@@ -74,6 +78,61 @@ def test_update_last_scraped(db):
     assert len(companies[0]["last_scraped_at"]) > 0
 
 
+def test_get_jobs_for_profile_best_score_and_min(db):
+    """Dashboard jobs: dedupe by URL, best score across runs, min_score filter."""
+    uid = 1
+    row = db.execute("SELECT active_profile_id FROM users WHERE id = ?", (uid,)).fetchone()
+    assert row and row["active_profile_id"]
+    pid = int(row["active_profile_id"])
+    upsert_job(
+        db,
+        {
+            "url": "https://example.com/job/1",
+            "title": "Engineer",
+            "company": "Co",
+            "location": "BLR",
+            "date_posted": "",
+            "source": "gh",
+            "work_mode": "remote",
+            "jd_text": "",
+            "funding_stage": "",
+            "has_esop": False,
+            "company_type": "product",
+            "notice_compatible": True,
+        },
+    )
+    r1 = insert_run(db, {"user_id": uid, "search_profile_id": pid, "status": "completed"})
+    r2 = insert_run(db, {"user_id": uid, "search_profile_id": pid, "status": "completed"})
+    db.execute(
+        """INSERT INTO job_runs (run_id, job_url, rank_score, score, reason, skill_gap_json)
+           VALUES (?, ?, 0.5, 5, '', '{}')""",
+        (r1, "https://example.com/job/1"),
+    )
+    db.execute(
+        """INSERT INTO job_runs (run_id, job_url, rank_score, score, reason, skill_gap_json)
+           VALUES (?, ?, 0.9, 8, 'great', '{}')""",
+        (r2, "https://example.com/job/1"),
+    )
+    db.commit()
+    assert len(get_jobs_for_profile(db, uid, pid, min_score=6)) == 1
+    j = get_jobs_for_profile(db, uid, pid, min_score=6)[0]
+    assert j["run_score"] == 8
+    assert j["reason"] == "great"
+    assert len(get_jobs_for_profile(db, uid, pid, min_score=9)) == 0
+
+
+def test_clear_scrape_freshness(db):
+    insert_company(db, {"name": "A"})
+    insert_company(db, {"name": "B"})
+    rows = get_all_companies(db)
+    update_last_scraped(db, rows[0]["id"])
+    assert get_all_companies(db)[0]["last_scraped_at"] is not None
+    n = clear_scrape_freshness(db)
+    assert n == 2
+    for c in get_all_companies(db):
+        assert c["last_scraped_at"] is None
+
+
 def test_delete_company(db):
     """delete_company removes the record."""
     row_id = insert_company(db, {"name": "ToDelete"})
@@ -127,3 +186,40 @@ def test_multiple_companies(db):
     assert len(all_cos) == 3
     retrieved_names = {c["name"] for c in all_cos}
     assert retrieved_names == set(names)
+
+
+def test_update_company_fields_patches_row(db):
+    """update_company_fields updates only provided columns."""
+    row_id = insert_company(
+        db,
+        {
+            "name": "ProbeCo",
+            "ats_type": "custom",
+            "careers_url": "https://probeco.com/careers",
+            "ats_slug": "",
+        },
+    )
+    update_company_fields(
+        db,
+        row_id,
+        {
+            "ats_type": "greenhouse",
+            "ats_slug": "probeco",
+            "careers_url": "https://boards.greenhouse.io/probeco",
+        },
+    )
+    companies = get_all_companies(db)
+    assert len(companies) == 1
+    c = companies[0]
+    assert c["ats_type"] == "greenhouse"
+    assert c["ats_slug"] == "probeco"
+    assert c["careers_url"] == "https://boards.greenhouse.io/probeco"
+    assert c["name"] == "ProbeCo"
+
+
+def test_update_company_fields_empty_noop(db):
+    """Empty fields dict does not error and leaves row unchanged."""
+    row_id = insert_company(db, {"name": "NoopCo", "ats_type": "lever", "ats_slug": "x"})
+    update_company_fields(db, row_id, {})
+    c = get_all_companies(db)[0]
+    assert c["ats_slug"] == "x"

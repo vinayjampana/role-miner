@@ -16,7 +16,7 @@ resume_summary + search_profile.yaml
   → semantic rank (embeddings) or TF-IDF fallback
   → top 50 → ONE LLM call → score 0–10 + skill gap
   → output/scored_jobs_TIMESTAMP.json
-  → React dashboard (Dashboard · RunLogs · Companies)
+  → React app (Dashboard · Tracker · RunLogs · Companies · Settings)
 ```
 
 **Cost per run: < $0.002 (~₹0.17)**
@@ -65,7 +65,12 @@ python main.py run
 
 # Start API server
 python main.py serve   # http://localhost:8000
+
+# Clear scraper freshness so the next run re-scrapes every company
+python main.py reset-scrape
 ```
+
+Subcommands are explicit: `bootstrap | run | serve | reset-scrape` (no default).
 
 ### Full stack (API + React)
 
@@ -94,12 +99,17 @@ resume_summary: |
   Senior full-stack engineer, 8+ years, ...
 ```
 
-## API endpoints
+## API
+
+All routes are under the app root (e.g. `/jobs/latest`). The API uses a lightweight **user** row in SQLite: send **`X-User-Id: <id>`** to act as that user, or omit it / send `0` to use the default user created on first use.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/jobs/latest` | Jobs from most recent run |
-| GET | `/jobs/run/{id}` | Jobs for a specific run |
+| GET | `/jobs/latest` | Jobs across **all completed runs** for the **active search profile**, deduped by URL, **best score per URL**; query `min_score` (default **6**) |
+| GET | `/jobs/run/{id}` | Jobs for one run (must belong to the user) |
+| GET | `/jobs/tracked` | Jobs with any non-new tracker status |
+| POST | `/jobs/status` | Set tracker status + notes (`url`, `status`, `notes`) — e.g. `saved`, `archived`, `applied`, `clicked` |
+| POST | `/jobs/click` | Mark job as `clicked` when opening apply link (if still `new`) |
 | GET | `/runs` | Run history (last 20) |
 | GET | `/runs/{id}` | Run detail with all pipeline events |
 | POST | `/trigger` | Start a new pipeline run, returns `run_id` |
@@ -107,10 +117,21 @@ resume_summary: |
 | GET | `/stats` | Aggregate totals + per-source job counts |
 | GET | `/companies` | All companies in registry |
 | POST | `/companies/discover` | Discover career URLs for company names (SSE stream) |
+| GET | `/users` | List users |
+| POST | `/users` | Create user |
+| GET | `/me` | Current user (from `X-User-Id`) + active profile |
+| GET | `/profile` | Active search profile (YAML-backed) |
+| PUT | `/profile` | Update active profile |
+| GET | `/profile/resume` | Resume metadata |
+| POST | `/profile/resume` | Upload resume |
+| GET | `/settings` | Runtime settings |
+| PUT | `/settings` | Update runtime settings |
 
 ## Frontend views
 
-**Dashboard** — job grid with filters: min score slider, work mode, company type, ESOP-only, notice-compatible-only. Each card shows score badge, skill matches (green) vs gaps (red), apply link.
+**Dashboard** — job grid for the active profile: **min score** (default 6, API-aligned), work mode, company type, ESOP / notice filters, optional **hide archived / dismissed**. Cards: score badge, skill match vs gap, **Apply** (records **clicked** when first opened), **Save for later**, **Archive**, **Mark applied**. Detail drawer has full tracker dropdown + notes.
+
+**Tracker** — grouped board for jobs you have marked (saved, archived, applied, clicked, etc.) with readable section titles.
 
 **RunLogs** — per-run pipeline breakdown:
 - Pipeline step tracker: Scrape → Filter → Role → Embed → Rank → Score with live status badges
@@ -126,6 +147,8 @@ resume_summary: |
 
 **Companies** — registry browser with search + ATS filter. **Discover panel** (`+ Discover` button): paste company names, resolves career URLs via 4-step flow (cache → URL heuristics → Brave Search → LLM), streams results per-company, auto-adds to DB.
 
+**Settings** — user switcher (`X-User-Id`), resume upload, profile editor tied to the pipeline.
+
 ## Company discovery flow
 
 ```
@@ -139,7 +162,7 @@ Company name
 
 ## ChromaDB vector store
 
-Two persistent collections in `roleminer/registry/chroma/`:
+Two persistent collections (default path under `roleminer/registry/chroma/`):
 
 | Collection | Populated | Use |
 |---|---|---|
@@ -160,7 +183,7 @@ Two persistent collections in `roleminer/registry/chroma/`:
 ## Project structure
 
 ```
-main.py                    # CLI: bootstrap | run | serve
+main.py                    # CLI: bootstrap | run | serve | reset-scrape
 config.py                  # paths, env vars, model config
 search_profile.yaml        # your job preferences
 Dockerfile
@@ -168,8 +191,10 @@ docker-compose.yml
 roleminer/
 ├── scrapers/              # greenhouse · lever · ashby · cutshort · workday
 ├── registry/
-│   ├── db.py              # SQLite CRUD (companies, runs, run_events)
+│   ├── db.py              # SQLite CRUD (companies, runs, run_events, users, profiles, job_status)
 │   ├── vector_store.py    # ChromaDB collections (companies + jobs)
+│   ├── ats_detect.py      # ATS URL detection + embedded career links
+│   ├── chroma/            # default Chroma persistence directory
 │   └── career_finder.py   # 4-step company career URL discovery
 ├── pipeline/
 │   ├── embedder.py        # OpenRouter embedding client
@@ -177,10 +202,13 @@ roleminer/
 │   ├── filter.py
 │   ├── role_filter.py
 │   └── scorer.py
-└── api/                   # FastAPI routes + SSE stream
+└── api/                   # FastAPI routes + SSE + auth header
+    ├── auth.py            # X-User-Id → CurrentUser
+    └── routes/            # jobs, users, preferences, companies, runs, stream, stats
 frontend/
 └── src/
-    ├── views/             # Dashboard · RunLogs · Companies
+    ├── views/             # Dashboard · Tracker · RunLogs · Companies · Settings
+    ├── auth/              # user context for API client
     ├── components/        # JobCard · JobDetail · RunEventStream
     ├── lib/datetime.ts    # IST formatting helpers
     └── api/client.ts      # typed API client
@@ -217,3 +245,4 @@ Live HTTP tests hit real public APIs (Greenhouse/Lever/Ashby). LLM calls are moc
 - LLM provider agnostic: set `LLM_API_KEY` + `LLM_BASE_URL` for any OpenAI-compatible API
 - Scraper freshness: companies scraped within `SCRAPER_FRESHNESS_HOURS` (default 24h) are skipped
 - Stale "running" runs auto-cleaned to "failed" on server startup
+- **Job shortlist** is per **active profile**: all completed runs for that profile are merged; each URL keeps its **best** score; dashboard defaults to **score ≥ 6**

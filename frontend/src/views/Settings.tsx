@@ -76,7 +76,7 @@ export function Settings() {
     mutationFn: (body: SearchProfile) => api.putProfile(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["profile"] });
-      setBanner({ kind: "ok", text: "Profile saved to search_profile.yaml" });
+      setBanner({ kind: "ok", text: "Profile saved for this user" });
     },
     onError: (e: Error) => setBanner({ kind: "err", text: e.message }),
   });
@@ -179,7 +179,7 @@ export function Settings() {
             <form onSubmit={onSubmitProfile} className="bg-white border border-slate-200 rounded-lg p-4 space-y-4 shadow-sm">
               <h2 className="font-semibold text-slate-800">Job context &amp; resume summary</h2>
               <p className="text-xs text-slate-500">
-                This maps to <code className="bg-slate-100 px-1 rounded">search_profile.yaml</code>. The resume summary is the main signal for LLM scoring; keep it dense and factual.
+                Stored per user in the local database (no YAML). The resume summary is the main signal for LLM scoring; keep it dense and factual.
               </p>
 
               <div>

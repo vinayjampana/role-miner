@@ -15,6 +15,8 @@ OUTPUT_DIR = ROOT / "output"
 DB_PATH = ROOT / "roleminer" / "registry" / "roleminer.db"
 CHROMA_PATH = ROOT / "roleminer" / "registry" / "chroma"
 SEARCH_PROFILE = ROOT / "search_profile.yaml"
+RESUME_DIR = ROOT / "data" / "resumes"
+# Legacy single-file path (migrated to RESUME_DIR / "<user_id>.pdf" per user)
 RESUME_PDF = ROOT / "resume.pdf"
 
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
@@ -26,7 +28,21 @@ SCRAPER_FRESHNESS_HOURS = int(os.getenv("SCRAPER_FRESHNESS_HOURS", "24"))
 BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "")
 DISCOVER_MODEL = os.getenv("DISCOVER_MODEL", "tencent/hy3-preview:free")
 
-EMBED_API_KEY = os.getenv("EMBED_API_KEY", os.getenv("LLM_API_KEY", ""))
+
+def _resolve_embed_api_key() -> str:
+    """
+    Key for OpenRouter (or other) embeddings.
+
+    If EMBED_API_KEY is unset or blank (including `EMBED_API_KEY=` in .env),
+    fall back to LLM_API_KEY so embeddings still authenticate.
+    """
+    for key in (os.getenv("EMBED_API_KEY"), os.getenv("LLM_API_KEY")):
+        if key and str(key).strip():
+            return str(key).strip()
+    return ""
+
+
+EMBED_API_KEY = _resolve_embed_api_key()
 EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "https://openrouter.ai/api/v1")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2:free")
 
@@ -47,7 +63,6 @@ def sync_from_environ() -> None:
     m.SCRAPER_FRESHNESS_HOURS = int(os.getenv("SCRAPER_FRESHNESS_HOURS", "24"))
     m.BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "")
     m.DISCOVER_MODEL = os.getenv("DISCOVER_MODEL", "tencent/hy3-preview:free")
-    _lk = os.getenv("LLM_API_KEY", "")
-    m.EMBED_API_KEY = os.getenv("EMBED_API_KEY", _lk)
+    m.EMBED_API_KEY = _resolve_embed_api_key()
     m.EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "https://openrouter.ai/api/v1")
     m.EMBED_MODEL = os.getenv("EMBED_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2:free")

@@ -29,18 +29,22 @@ Personal tool for Vinay to find relevant senior engineering roles in India. Not 
 - **Scraper freshness**: `SCRAPER_FRESHNESS_HOURS` (default 24h) — skip companies scraped recently; emits `scraper_skipped` event
 - **Stale run cleanup**: on server startup, runs stuck in `running` status → auto-marked `failed`
 - **Company auto-discovery**: job URLs parsed for ATS patterns (greenhouse/lever/ashby) after each scrape run; new companies inserted automatically
+- **Job shortlist**: `GET /jobs/latest` uses **`get_jobs_for_profile`** — all **completed** runs for the user’s **active** `search_profile_id` (plus legacy runs with `NULL` profile); **dedupe by `job_url`**; keep **max(score)** per URL (tie-break: latest run); **`min_score` query default 6**
+- **Tracker**: `job_status` per user + URL — statuses include `new`, `clicked`, `saved`, `archived`, `applied`, `interviewing`, `rejected`, `dismissed`; `POST /jobs/status`, `POST /jobs/click` (promote `new` → `clicked`)
+- **API identity**: optional **`X-User-Id`** header; omit or `0` → default user (`ensure_default_user_id`)
 
 ## Directory Layout
 
 ```
-main.py                    # CLI: bootstrap | run | serve
+main.py                    # CLI: bootstrap | run | serve | reset-scrape
 config.py                  # all env vars + paths
 search_profile.yaml        # user-edited job preferences
 roleminer/
 ├── scrapers/              # one file per ATS source
 ├── registry/
-│   ├── db.py              # SQLite CRUD + cleanup_stale_runs
+│   ├── db.py              # SQLite CRUD + cleanup_stale_runs + users/profiles + get_jobs_for_profile
 │   ├── vector_store.py    # ChromaDB: companies + jobs collections
+│   ├── ats_detect.py      # ATS detect + embedded careers URLs in HTML
 │   └── career_finder.py   # 4-step career URL discovery (cache→heuristic→search→LLM)
 ├── pipeline/
 │   ├── embedder.py        # OpenRouter embed client + embed_batched()
@@ -50,13 +54,19 @@ roleminer/
 │   └── scorer.py
 └── api/
     ├── main.py            # FastAPI app + lifespan (stale run cleanup)
+    ├── auth.py            # X-User-Id → CurrentUser (active_profile_id)
     ├── models.py          # Pydantic models incl. DiscoverRequest/DiscoverResult
     └── routes/
+        ├── jobs.py        # GET /jobs/latest|run|tracked, POST /jobs/status|click
+        ├── users.py       # GET/POST /users, GET /me
+        ├── preferences.py # profile + resume + settings
         ├── companies.py   # GET /companies + POST /companies/discover (SSE)
         ├── runs.py        # run management + trigger
+        ├── stats.py
         └── stream.py      # SSE pipeline event stream
 frontend/src/
-├── views/                 # Dashboard · RunLogs · Companies
+├── views/                 # Dashboard · Tracker · RunLogs · Companies · Settings
+├── auth/                  # user id for client (X-User-Id)
 ├── components/            # JobCard · JobDetail · RunEventStream
 ├── lib/datetime.ts        # IST formatting (formatRunStartedAt, formatEventLogTime)
 └── api/client.ts          # typed API client incl. discoverCompanies()
@@ -99,9 +109,10 @@ Every step emits structured events to SQLite + SSE queue:
 
 ```bash
 # CLI only
-python main.py bootstrap    # seed company registry + embed companies
-python main.py run          # scrape → filter → embed → rank → score
-python main.py serve        # start FastAPI on :8000
+python main.py bootstrap     # seed company registry + embed companies
+python main.py run           # scrape → filter → embed → rank → score
+python main.py serve         # start FastAPI on :8000
+python main.py reset-scrape  # clear last_scraped_at (force full re-scrape next run)
 
 # Full stack
 docker compose up           # API on :8000, frontend on :3000

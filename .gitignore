@@ -10,3 +10,6 @@ resume.pdf
 .env
 frontend/node_modules/
 frontend/dist/
+
+# Local Chroma persistence (bootstrap/run creates this)
+roleminer/registry/chroma/

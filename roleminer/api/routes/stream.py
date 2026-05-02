@@ -3,17 +3,27 @@ import asyncio
 import json
 import sqlite3
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
 from roleminer.api.dependencies import active_runs, get_db
-from roleminer.registry.db import get_run, get_run_events
+from roleminer.registry.db import ensure_default_user_id, get_run, get_run_events
 
 router = APIRouter(tags=["stream"])
 
 
 @router.get("/stream/{run_id}")
-async def stream_run(run_id: int, db: sqlite3.Connection = Depends(get_db)):
+async def stream_run(
+    run_id: int,
+    db: sqlite3.Connection = Depends(get_db),
+    user_id: int | None = Query(None, description="Must match the run owner (defaults to user 1)"),
+):
+    run = get_run(db, run_id)
+    if run:
+        uid = user_id if user_id is not None else ensure_default_user_id(db)
+        ruid = run.get("user_id")
+        if ruid is not None and int(ruid) != uid:
+            raise HTTPException(status_code=403, detail="run belongs to another user")
     queue = active_runs.get(run_id)
 
     if queue is None:

@@ -1,14 +1,17 @@
-"""Search profile, resume upload, and runtime LLM / env settings (backed by YAML + .env)."""
+"""Search profile, resume upload, and runtime LLM / env settings (DB per user + .env)."""
 from __future__ import annotations
 
+import json
 import logging
 import re
+import sqlite3
 from pathlib import Path
 
-import yaml
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 import config
+from roleminer.api.auth import CurrentUser, get_current_user
+from roleminer.api.dependencies import get_db
 from roleminer.api.models import (
     ResumeInfoOut,
     RuntimeSettingsOut,
@@ -16,6 +19,12 @@ from roleminer.api.models import (
     SearchProfileOut,
 )
 from roleminer.pipeline import embedder
+from roleminer.registry.db import (
+    get_active_profile_for_user,
+    get_search_profile_row,
+    set_profile_resume_path,
+    update_search_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,28 +103,55 @@ def _apply_env_to_process(updates: dict[str, str]) -> None:
     )
 
 
+def _row_to_search_profile_out(row: dict) -> SearchProfileOut:
+    def _loads(key: str, default):
+        try:
+            v = json.loads(row.get(key) or "null")
+            return v if v is not None else default
+        except json.JSONDecodeError:
+            return default
+
+    return SearchProfileOut(
+        skills=[str(s).strip() for s in _loads("skills_json", []) if str(s).strip()],
+        locations=[str(s).strip() for s in _loads("locations_json", []) if str(s).strip()],
+        salary_min_lpa=int(row.get("salary_min_lpa") or 0),
+        work_mode=[str(m).lower().strip() for m in _loads("work_mode_json", []) if str(m).strip()],
+        company_type=[str(c).lower().strip() for c in _loads("company_type_json", []) if str(c).strip()],
+        exclude_companies=[str(s).strip() for s in _loads("exclude_companies_json", []) if str(s).strip()],
+        notice_days=int(row.get("notice_days") or 0),
+        resume_summary=str(row.get("resume_summary") or ""),
+    )
+
+
+def _resume_path_for_user(user_id: int) -> Path:
+    config.RESUME_DIR.mkdir(parents=True, exist_ok=True)
+    return config.RESUME_DIR / f"{user_id}.pdf"
+
+
 @router.get("/profile", response_model=SearchProfileOut)
-def get_profile():
-    path = config.SEARCH_PROFILE
-    if not path.exists():
-        raise HTTPException(404, "search_profile.yaml not found")
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:
-        logger.exception("Failed to parse search profile")
-        raise HTTPException(500, f"invalid YAML: {exc}") from exc
-    return SearchProfileOut.model_validate(raw)
+def get_profile(
+    db: sqlite3.Connection = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    _, prow = get_active_profile_for_user(db, current.id)
+    if not prow:
+        raise HTTPException(404, "no profile for user — create a user first")
+    return _row_to_search_profile_out(prow)
 
 
 @router.put("/profile", response_model=SearchProfileOut)
-def put_profile(body: SearchProfileOut):
-    path = config.SEARCH_PROFILE
-    try:
-        existing = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
-        if existing is None:
-            existing = {}
-    except Exception:
-        existing = {}
+def put_profile(
+    body: SearchProfileOut,
+    db: sqlite3.Connection = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    urow, prow = get_active_profile_for_user(db, current.id)
+    if not urow or not prow or not current.active_profile_id:
+        raise HTTPException(404, "no profile for user")
+    pid = int(current.active_profile_id)
+    pr = get_search_profile_row(db, pid)
+    if not pr:
+        raise HTTPException(404, "profile row missing")
 
     dump = body.model_dump()
     dump["work_mode"] = [m.lower().strip() for m in dump["work_mode"] if str(m).strip()]
@@ -124,48 +160,53 @@ def put_profile(body: SearchProfileOut):
     dump["locations"] = [str(s).strip() for s in dump["locations"] if str(s).strip()]
     dump["exclude_companies"] = [str(s).strip() for s in dump["exclude_companies"] if str(s).strip()]
 
-    merged = {**existing, **dump}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    header = (
-        "# RoleMiner — search profile (saved from UI; safe to edit by hand)\n\n"
+    update_search_profile(
+        db,
+        pid,
+        skills=dump["skills"],
+        locations=dump["locations"],
+        salary_min_lpa=int(dump["salary_min_lpa"]),
+        work_mode=dump["work_mode"],
+        company_type=dump["company_type"],
+        exclude_companies=dump["exclude_companies"],
+        notice_days=int(dump["notice_days"]),
+        resume_summary=str(dump.get("resume_summary") or ""),
     )
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(header)
-        yaml.safe_dump(
-            merged,
-            fh,
-            allow_unicode=True,
-            default_flow_style=False,
-            sort_keys=False,
-        )
-
+    row = get_search_profile_row(db, pid)
     logger.info(
-        "Profile saved: %d skills, %d locations, salary_min_lpa=%s notice_days=%s resume_summary_chars=%d",
+        "Profile saved (user=%s profile_id=%s): %d skills, %d locations",
+        current.id,
+        pid,
         len(dump["skills"]),
         len(dump["locations"]),
-        dump["salary_min_lpa"],
-        dump["notice_days"],
-        len((dump.get("resume_summary") or "").strip()),
     )
-    return SearchProfileOut.model_validate(merged)
+    return _row_to_search_profile_out(row or pr)
 
 
 @router.get("/profile/resume", response_model=ResumeInfoOut)
-def resume_info():
-    p = config.RESUME_PDF
-    return ResumeInfoOut(has_pdf=p.exists() and p.stat().st_size > 0, path=str(p.name))
+def resume_info(current: CurrentUser = Depends(get_current_user)):
+    p = _resume_path_for_user(current.id)
+    legacy = config.RESUME_PDF
+    has_new = p.exists() and p.stat().st_size > 0
+    has_legacy = legacy.exists() and legacy.stat().st_size > 0
+    return ResumeInfoOut(has_pdf=has_new or has_legacy, path=str(p.name))
 
 
 @router.post("/profile/resume")
-async def upload_resume(file: UploadFile = File(...)):
+async def upload_resume(
+    file: UploadFile = File(...),
+    db: sqlite3.Connection = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "upload a PDF file")
-    dest = config.RESUME_PDF
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = _resume_path_for_user(current.id)
     data = await file.read()
     if not data:
         raise HTTPException(400, "empty file")
     dest.write_bytes(data)
+    if current.active_profile_id:
+        set_profile_resume_path(db, int(current.active_profile_id), dest.name)
     logger.info("Resume PDF saved: %s (%d bytes)", dest, len(data))
     return {"ok": True, "path": dest.name, "bytes": len(data)}
 
