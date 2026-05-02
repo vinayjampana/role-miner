@@ -11,21 +11,26 @@
 skills:
   - React
   - TypeScript
+  - Next.js
+  - Redux Toolkit
   - Node.js
-  - Python
-  - GraphQL
-  - PostgreSQL
+  - REST API
+  - Nx Monorepo
+  - Vite
+  - Webpack
+  - Jest
+  - GitHub Actions
+  - CI/CD
+  - Performance optimization
+  - Design systems
 
 # WHERE YOU'LL WORK
 # A job passes if its location string contains ANY of these (case-insensitive).
 # Example: "Bangalore, Karnataka" matches "Bangalore"
 # "Remote" is special — see work_mode below.
-# Valid city names: Bangalore, Hyderabad, Mumbai, NCR, Pune, Chennai, Remote
 locations:
-  - Bangalore
   - Hyderabad
-  - Mumbai
-  - NCR
+  - Bangalore
   - Remote
 
 # MINIMUM SALARY (Lakhs Per Annum)
@@ -39,7 +44,6 @@ salary_min_lpa: 25
 #   1. If "remote" is listed here → remote jobs pass location check regardless of city
 #   2. Passed to LLM for context
 # Options: remote | hybrid | onsite
-# Tip: remove "onsite" if you won't relocate or commute daily.
 work_mode:
   - remote
   - hybrid
@@ -48,39 +52,30 @@ work_mode:
 # COMPANY TYPE FILTER
 # "product" = keeps product companies, filters out IT services/outsourcing firms
 #             (TCS, Infosys, Wipro, Accenture etc. are auto-detected and dropped)
-# "service" = keeps service companies too (not recommended)
-# Keep as [product] unless you want staffing/consulting roles.
+# Keep as [product] — no IT services/staffing/consulting roles.
 company_type:
   - product
 
 # COMPANIES TO ALWAYS SKIP
-# Exact name match (case-insensitive). Add companies you've already applied to,
-# had bad experiences with, or are just not interested in.
-# Example:
-#   exclude_companies:
-#     - Flipkart
-#     - Ola
+# Exact name match (case-insensitive). Add companies already applied to,
+# bad experiences, or not interested in.
 exclude_companies: []
 
 # YOUR NOTICE PERIOD (days)
-# Used to flag notice-incompatible jobs.
-# Jobs with "immediate joiner" / "no notice period" in JD get notice_compatible=False
-# when this value > 0. Those jobs still appear in output — just flagged.
+# Jobs with "immediate joiner" / "no notice period" in JD get flagged
+# notice_compatible=False when this value > 0. Still appear in output — just flagged.
 # Set to 0 if you can join immediately.
 notice_days: 60
 
 # YOUR RESUME SUMMARY
-# This is the MOST IMPORTANT field for scoring quality.
-# The LLM reads this first before scoring every job.
-# Write it like a tight recruiter brief: years of exp, actual stack, domain,
-# what kind of role/company you want. 3–5 sentences max.
-# Bad example (too generic): "Senior engineer with 8 years experience."
-# Good example:
-#   8 yrs full-stack. React/TypeScript frontend, Node.js/Python backend.
-#   Built fintech products at Series B startups. Strong in system design,
-#   API design, and developer tooling. Want IC role at product company,
-#   Series A–C, ESOP preferred, no pure frontend or maintenance work.
+# MOST IMPORTANT field for scoring quality. LLM reads this before scoring every job.
+# Write tight — years of exp, actual stack, domain, what kind of role you want.
 resume_summary: |
-  Senior full-stack engineer with 8+ years experience.
-  Strong in React, TypeScript, Node.js, Python.
-  Prefers product companies with ESOP, Series A-C preferred.
+  Senior Full Stack Engineer, 5+ years. React 18/19, TypeScript, Next.js, Node.js.
+  Built enterprise B2B SaaS at Zotok.ai: Nx monorepo migration (80K+ LOC, 3 apps),
+  40+ component design system adopted by 15+ engineers, JS bundle 9MB→5MB, full
+  GitHub Actions CI/CD pipeline. Strong in frontend architecture, performance,
+  and design systems. Backend-capable: REST APIs, RBAC, service architecture in Node.js.
+  Target: Senior Frontend Engineer / SDE2 / SDE3 at product companies.
+  Hyderabad or Bangalore or Remote. ESOP preferred. No pure MAANG (DSA-heavy).
+  Notice: 60 days (negotiable to 30).
