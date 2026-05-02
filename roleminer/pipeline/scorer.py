@@ -104,15 +104,12 @@ async def score_jobs(
 
     batch = jobs[:50]
 
-    effective_key = api_key or os.getenv("OPENAI_API_KEY", "") or os.getenv("DEEPSEEK_API_KEY", "")
+    effective_key = api_key or os.getenv("LLM_API_KEY", "")
 
     client_kwargs: dict[str, Any] = {"api_key": effective_key or "sk-placeholder"}
-    # OPENAI_BASE_URL overrides all (covers OpenCode, DeepSeek, or any compatible provider)
-    base_url = os.getenv("OPENAI_BASE_URL", "")
+    base_url = os.getenv("LLM_BASE_URL", "")
     if base_url:
         client_kwargs["base_url"] = base_url
-    elif "deepseek" in model.lower():
-        client_kwargs["base_url"] = "https://api.deepseek.com/v1"
 
     client = AsyncOpenAI(**client_kwargs)
 
@@ -126,6 +123,7 @@ async def score_jobs(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
+            max_tokens=4000,  # reasoning models need room for think + JSON output
         )
     except Exception as exc:
         logger.error("LLM scoring failed: %s", exc)

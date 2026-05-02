@@ -151,7 +151,7 @@ async def run() -> None:
 
     # Score top 50
     model = config.SCORING_MODEL
-    api_key = config.OPENAI_API_KEY or config.DEEPSEEK_API_KEY
+    api_key = config.LLM_API_KEY
 
     scored, tokens_used, cost_usd = await score_jobs(
         jobs=filtered[:50],
