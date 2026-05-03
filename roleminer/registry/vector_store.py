@@ -4,12 +4,15 @@ from pathlib import Path
 
 import chromadb
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
-def get_client(chroma_path: Path) -> chromadb.PersistentClient:
-    chroma_path.mkdir(parents=True, exist_ok=True)
-    return chromadb.PersistentClient(path=str(chroma_path))
+def get_client(chroma_path: Path | None = None) -> chromadb.PersistentClient:
+    p = chroma_path if chroma_path is not None else config.CHROMA_PATH
+    p.mkdir(parents=True, exist_ok=True)
+    return chromadb.PersistentClient(path=str(p))
 
 
 def _companies_col(client: chromadb.PersistentClient) -> chromadb.Collection:

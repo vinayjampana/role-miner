@@ -24,6 +24,7 @@ export interface Job {
 export interface RunSummary {
   id: number;
   timestamp: string;
+  started_at?: string;
   status: string | null;
   duration_seconds: number | null;
   jobs_found: number | null;
@@ -147,6 +148,31 @@ export interface AppUser {
 }
 
 export const api = {
+  auth: {
+    login: (email: string, password: string) =>
+      j<{ token: string; user_id: number; name: string; email: string | null }>(
+        authFetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        })
+      ),
+    register: (name: string, email: string, password: string, registrationToken: string) =>
+      j<{ user_id: number; name: string; email: string | null }>(
+        authFetch("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name,
+            email,
+            password,
+            registration_token: registrationToken,
+          }),
+        })
+      ),
+    me: () => j<AppUser>(authFetch("/api/auth/me")),
+  },
+
   listUsers: () => j<AppUser[]>(authFetch("/api/users")),
   createUser: (name: string, email?: string) =>
     j<AppUser>(
@@ -183,6 +209,14 @@ export const api = {
   trigger: () => j<{ run_id: number }>(authFetch("/api/trigger", { method: "POST" })),
   stats: () => j<any>(authFetch("/api/stats")),
   companies: () => j<Company[]>(authFetch("/api/companies")),
+  addCompany: (data: { name: string; ats_type?: string; ats_slug?: string; careers_url?: string }) =>
+    j<Company>(
+      authFetch("/api/companies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      })
+    ),
   /** Partial PATCH: only include keys you want to change. */
   patchCompany: (id: number, body: { careers_url?: string; ats_type?: string }) =>
     j<Company>(

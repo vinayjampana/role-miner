@@ -1,37 +1,50 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api/client";
-import { useUserStore } from "./userStore";
+import { LoginPage } from "./LoginPage";
+import { authFetch, useUserStore } from "./userStore";
 
 export function UserBootstrap({ children }: { children: ReactNode }) {
-  const [ready, setReady] = useState(false);
+  const token = useUserStore((s) => s.token);
+  const [phase, setPhase] = useState<"loading" | "login" | "app">("loading");
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const users = await api.listUsers();
+      await useUserStore.persist.rehydrate();
+      if (cancelled) return;
+      const t = useUserStore.getState().token;
+      if (!t) {
+        const probe = await authFetch("/api/jobs/latest?min_score=6");
         if (cancelled) return;
-        const cur = useUserStore.getState().userId;
-        if (users.length > 0 && (cur == null || !users.some((u) => u.id === cur))) {
-          useUserStore.getState().setUserId(users[0].id);
+        if (probe.status === 401) {
+          setPhase("login");
+          return;
         }
+        setPhase("app");
+        return;
+      }
+      try {
+        await api.auth.me();
+        if (!cancelled) setPhase("app");
       } catch {
-        /* API down — still render; requests fall back to default user on server */
-      } finally {
-        if (!cancelled) setReady(true);
+        useUserStore.getState().logout();
+        if (!cancelled) setPhase("login");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [token]);
 
-  if (!ready) {
+  if (phase === "loading") {
     return (
       <div className="h-full flex items-center justify-center text-slate-500 text-sm bg-slate-50">
         Loading…
       </div>
     );
+  }
+  if (phase === "login") {
+    return <LoginPage />;
   }
   return <>{children}</>;
 }

@@ -1,8 +1,7 @@
 import { useState } from "react";
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { UserBootstrap } from "./auth/UserBootstrap";
 import { useUserStore } from "./auth/userStore";
-import { api, type AppUser } from "./api/client";
 import { Companies } from "./views/Companies";
 import { Dashboard } from "./views/Dashboard";
 import { RunLogs } from "./views/RunLogs";
@@ -11,74 +10,33 @@ import { Tracker } from "./views/Tracker";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false } } });
 
-function UserPicker() {
+function NavAuth() {
   const queryClient = useQueryClient();
-  const userId = useUserStore((s) => s.userId);
-  const setUserId = useUserStore((s) => s.setUserId);
-  const [showNew, setShowNew] = useState(false);
-  const [newName, setNewName] = useState("");
+  const token = useUserStore((s) => s.token);
+  const name = useUserStore((s) => s.name);
+  const email = useUserStore((s) => s.email);
 
-  const { data: users = [] } = useQuery({
-    queryKey: ["users"],
-    queryFn: api.listUsers,
-    staleTime: 30_000,
-  });
+  if (!token) {
+    return null;
+  }
 
-  const onSwitch = (id: number) => {
-    setUserId(id);
-    queryClient.invalidateQueries();
-  };
-
-  const onCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const name = newName.trim();
-    if (!name) return;
-    const u = await api.createUser(name);
-    setNewName("");
-    setShowNew(false);
-    await queryClient.invalidateQueries({ queryKey: ["users"] });
-    onSwitch(u.id);
-  };
-
-  const current = users.find((u: AppUser) => u.id === userId);
+  const label = name?.trim() || email?.trim() || "Signed in";
 
   return (
-    <div className="flex items-center gap-2 ml-auto">
-      <label className="text-xs text-slate-500 whitespace-nowrap">User</label>
-      <select
-        className="text-sm border border-slate-200 rounded px-2 py-1 bg-white max-w-[160px]"
-        value={userId ?? ""}
-        onChange={(e) => onSwitch(parseInt(e.target.value, 10))}
-      >
-        {users.map((u: AppUser) => (
-          <option key={u.id} value={u.id}>
-            {u.name}
-          </option>
-        ))}
-      </select>
+    <div className="flex items-center gap-3 ml-auto">
+      <span className="text-xs text-slate-600 max-w-[200px] truncate" title={email ?? name ?? undefined}>
+        {label}
+      </span>
       <button
         type="button"
-        className="text-xs text-blue-600 hover:underline"
-        onClick={() => setShowNew((v) => !v)}
+        onClick={() => {
+          useUserStore.getState().logout();
+          queryClient.clear();
+        }}
+        className="text-sm px-3 py-1 rounded border border-slate-300 text-slate-700 hover:bg-slate-50"
       >
-        + New
+        Log out
       </button>
-      {showNew && (
-        <form onSubmit={onCreate} className="flex items-center gap-1">
-          <input
-            className="text-xs border border-slate-200 rounded px-2 py-1 w-28"
-            placeholder="Name"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-          />
-          <button type="submit" className="text-xs bg-slate-900 text-white px-2 py-1 rounded">
-            Add
-          </button>
-        </form>
-      )}
-      {current && (
-        <span className="text-xs text-slate-400 hidden sm:inline">#{current.id}</span>
-      )}
     </div>
   );
 }
@@ -138,7 +96,7 @@ function AppInner() {
             Profile &amp; LLM
           </button>
         </div>
-        <UserPicker />
+        <NavAuth />
       </nav>
       <div className="flex-1 overflow-hidden">
         {view === "dashboard" ? (

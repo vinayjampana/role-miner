@@ -19,6 +19,12 @@ DB_PATH = (
     if _db_override
     else (ROOT / "roleminer" / "registry" / "roleminer.db")
 )
+_chroma_override = os.getenv("CHROMA_PATH", "").strip()
+CHROMA_PATH = (
+    Path(_chroma_override).expanduser().resolve()
+    if _chroma_override
+    else (ROOT / "roleminer" / "registry" / "chroma")
+)
 # Static scrape/UI registry — optional override if JSON is mounted elsewhere
 _cj_override = os.getenv("ROLEMINER_COMPANIES_JSON", "").strip()
 COMPANIES_JSON_PATH = (
@@ -26,7 +32,6 @@ COMPANIES_JSON_PATH = (
     if _cj_override
     else (ROOT / "roleminer" / "registry" / "data" / "companies.json")
 )
-CHROMA_PATH = ROOT / "roleminer" / "registry" / "chroma"
 SEARCH_PROFILE = ROOT / "search_profile.yaml"
 RESUME_DIR = ROOT / "data" / "resumes"
 # Legacy single-file path (migrated to RESUME_DIR / "<user_id>.pdf" per user)
@@ -87,3 +92,9 @@ def sync_from_environ() -> None:
     m.EMBED_API_KEY = _resolve_embed_api_key()
     m.EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "https://openrouter.ai/api/v1")
     m.EMBED_MODEL = os.getenv("EMBED_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2:free")
+    _ch = os.getenv("CHROMA_PATH", "").strip()
+    m.CHROMA_PATH = (
+        Path(_ch).expanduser().resolve()
+        if _ch
+        else (ROOT / "roleminer" / "registry" / "chroma")
+    )

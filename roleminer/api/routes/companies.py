@@ -8,15 +8,18 @@ import traceback
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 import config
+from roleminer.api.auth import get_current_user
 from roleminer.api.dependencies import active_runs, get_db
 from roleminer.api.models import CompanyOut, CompanyPatch, DiscoverRequest, TriggerResponse
 from roleminer.registry.career_finder import discover_companies
 from roleminer.registry.db import (
     get_all_companies,
     init_db,
+    insert_company,
     insert_run,
     insert_run_event,
     sync_static_registry_to_db,
@@ -30,16 +33,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["companies"])
 
-# Must match branches in main._scrape_company
+# Allowed values for API create/patch only; registry sync & pipeline may still use other ATS in DB/JSON.
 ALLOWED_ATS_TYPES = frozenset({
     "greenhouse",
     "lever",
     "ashby",
-    "smartrecruiters",
     "workday",
-    "cutshort",
-    "custom",
-    "custom_api",
 })
 
 
@@ -74,6 +73,42 @@ def list_companies(db: sqlite3.Connection = Depends(get_db)):
         rows = get_all_companies(db)
     out = [_row_to_company_out(r) for r in rows]
     return sorted(out, key=lambda c: c.name.lower())
+
+
+class CompanyCreate(BaseModel):
+    name: str
+    ats_type: str | None = None
+    ats_slug: str | None = None
+    careers_url: str | None = None
+
+
+@router.post("/companies", response_model=CompanyOut)
+def create_company(
+    body: CompanyCreate,
+    db: sqlite3.Connection = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    existing = db.execute(
+        "SELECT id FROM companies WHERE lower(name)=lower(?)",
+        (body.name,),
+    ).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail="Company already exists")
+    payload = body.model_dump(exclude_none=True)
+    if "ats_type" in payload:
+        raw_ats = (payload.get("ats_type") or "").strip().lower()
+        if not raw_ats:
+            payload.pop("ats_type", None)
+        elif raw_ats not in ALLOWED_ATS_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail="ats_type must be one of: " + ", ".join(sorted(ALLOWED_ATS_TYPES)),
+            )
+        else:
+            payload["ats_type"] = raw_ats
+    new_id = insert_company(db, payload)
+    row = db.execute("SELECT * FROM companies WHERE id=?", (new_id,)).fetchone()
+    return _row_to_company_out(row)
 
 
 def _row_to_company_out(row: sqlite3.Row | dict) -> CompanyOut:

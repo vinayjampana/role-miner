@@ -10,6 +10,7 @@ import logging
 
 import config
 from roleminer.registry.db import init_db, cleanup_stale_runs
+from roleminer.api.routes import auth as auth_routes
 from roleminer.api.routes import companies, jobs, preferences, runs, stats, stream, users
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ app.add_middleware(
 )
 
 app.include_router(jobs.router, prefix=_API_PREFIX)
+app.include_router(auth_routes.router, prefix=_API_PREFIX)
 app.include_router(users.router, prefix=_API_PREFIX)
 app.include_router(companies.router, prefix=_API_PREFIX)
 app.include_router(runs.router, prefix=_API_PREFIX)

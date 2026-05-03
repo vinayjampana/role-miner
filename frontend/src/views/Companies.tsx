@@ -1,17 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Company, type DiscoverResult } from "../api/client";
 
 /** Mirrors server ALLOWED_ATS_TYPES + unset for DB null */
 const ATS_EDIT_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "Unset (auto on scrape)" },
-  { value: "ashby", label: "ashby" },
-  { value: "custom", label: "custom" },
-  { value: "custom_api", label: "custom_api" },
-  { value: "cutshort", label: "cutshort" },
   { value: "greenhouse", label: "greenhouse" },
   { value: "lever", label: "lever" },
-  { value: "smartrecruiters", label: "smartrecruiters" },
+  { value: "ashby", label: "ashby" },
   { value: "workday", label: "workday" },
 ];
 
@@ -463,6 +460,71 @@ export function Companies({ onNavigateToRun }: { onNavigateToRun: (runId: number
   const [q, setQ] = useState("");
   const [ats, setAts] = useState<string>("");
   const [showDiscover, setShowDiscover] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addName, setAddName] = useState("");
+  const [addAts, setAddAts] = useState("");
+  const [addSlug, setAddSlug] = useState("");
+  const [addUrl, setAddUrl] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [addBusy, setAddBusy] = useState(false);
+  const [addOk, setAddOk] = useState(false);
+  const [addAtsMenuOpen, setAddAtsMenuOpen] = useState(false);
+  const addAtsMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!addAtsMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (addAtsMenuRef.current && !addAtsMenuRef.current.contains(e.target as Node)) {
+        setAddAtsMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [addAtsMenuOpen]);
+
+  const submitAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAddError(null);
+    setAddOk(false);
+    if (!addName.trim()) {
+      setAddError("Name is required");
+      return;
+    }
+    const atsVal = addAts.trim();
+    if (["greenhouse", "lever", "ashby"].includes(atsVal) && !addSlug.trim()) {
+      setAddError("ATS slug is required for this ATS type");
+      return;
+    }
+    if (atsVal === "workday" && !addUrl.trim()) {
+      setAddError("Careers URL is required for this ATS type");
+      return;
+    }
+    const body: Parameters<typeof api.addCompany>[0] = { name: addName.trim() };
+    if (atsVal) body.ats_type = atsVal;
+    if (addSlug.trim()) body.ats_slug = addSlug.trim();
+    if (addUrl.trim()) body.careers_url = addUrl.trim();
+    setAddBusy(true);
+    try {
+      await api.addCompany(body);
+      await qc.invalidateQueries({ queryKey: ["companies"] });
+      setAddOpen(false);
+      setAddName("");
+      setAddAts("");
+      setAddSlug("");
+      setAddUrl("");
+      setAddOk(true);
+      window.setTimeout(() => setAddOk(false), 4000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("already exists")) {
+        setAddError("A company with this name already exists");
+      } else {
+        setAddError(msg || "Failed to add company");
+      }
+    } finally {
+      setAddBusy(false);
+    }
+  };
 
   const atsOptions = useMemo(() => {
     const s = new Set<string>();
@@ -522,18 +584,36 @@ export function Companies({ onNavigateToRun }: { onNavigateToRun: (runId: number
             ))}
           </select>
         </div>
-        <div className="text-sm text-slate-600 pb-1">
+        <div className="text-sm text-slate-600 pb-1 flex items-center gap-2">
           {isLoading ? "Loading…" : isError ? "Failed to load" : `${filtered.length} / ${companies.length} companies`}
+          {addOk ? <span className="text-emerald-600 font-medium">Company added</span> : null}
         </div>
         <button
-          onClick={() => setShowDiscover((v) => !v)}
-          className="self-end mb-0.5 px-3 py-1.5 text-sm border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-50"
+          type="button"
+          onClick={() => {
+            setAddError(null);
+            setAddName("");
+            setAddAts("");
+            setAddSlug("");
+            setAddUrl("");
+            setAddAtsMenuOpen(false);
+            setAddOpen(true);
+          }}
+          className="self-end mb-0.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700"
         >
-          {showDiscover ? "Hide Discover" : "+ Discover"}
+          Add Company
         </button>
+        {false && (
+          <button
+            onClick={() => setShowDiscover((v) => !v)}
+            className="self-end mb-0.5 px-3 py-1.5 text-sm border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-50"
+          >
+            {showDiscover ? "Hide Discover" : "+ Discover"}
+          </button>
+        )}
       </header>
 
-      {showDiscover && (
+      {false && showDiscover && (
         <div className="shrink-0 px-4 py-3 bg-slate-50 border-b border-slate-200">
           <DiscoverPanel onAdded={() => qc.invalidateQueries({ queryKey: ["companies"] })} />
         </div>
@@ -563,6 +643,122 @@ export function Companies({ onNavigateToRun }: { onNavigateToRun: (runId: number
           </table>
         </div>
       </div>
+
+      {addOpen
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/40"
+              onClick={() => !addBusy && setAddOpen(false)}
+              onKeyDown={(e) => e.key === "Escape" && !addBusy && setAddOpen(false)}
+              role="presentation"
+            >
+              <div
+                className="bg-white rounded-lg border border-slate-200 shadow-lg max-w-lg w-full p-5 space-y-4 relative z-[1]"
+                role="dialog"
+                aria-modal="true"
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <div className="font-semibold text-slate-900">Add company</div>
+                {addError ? (
+                  <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded px-3 py-2">{addError}</div>
+                ) : null}
+                <form onSubmit={submitAdd} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Name *</label>
+                    <input
+                      value={addName}
+                      onChange={(e) => setAddName(e.target.value)}
+                      className="w-full border border-slate-200 rounded px-2 py-1.5 text-sm"
+                      required
+                      disabled={addBusy}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">ATS type</label>
+                    <div className="relative z-10" ref={addAtsMenuRef}>
+                      <button
+                        type="button"
+                        disabled={addBusy}
+                        onClick={() => setAddAtsMenuOpen((v) => !v)}
+                        className="w-full flex items-center justify-between gap-1 border border-slate-200 rounded px-2 py-1.5 text-sm bg-white text-left hover:bg-slate-50 disabled:opacity-50"
+                        aria-expanded={addAtsMenuOpen}
+                        aria-haspopup="listbox"
+                      >
+                        <span className="truncate">{atsOptionLabel(addAts, addAts)}</span>
+                        <span className="text-slate-400 shrink-0" aria-hidden>
+                          {addAtsMenuOpen ? "▴" : "▾"}
+                        </span>
+                      </button>
+                      {addAtsMenuOpen ? (
+                        <ul
+                          role="listbox"
+                          className="absolute left-0 right-0 top-full z-[300] mt-0.5 max-h-52 overflow-y-auto rounded border border-slate-200 bg-white py-0.5 shadow-lg"
+                        >
+                          {ATS_EDIT_OPTIONS.map((o) => (
+                            <li key={o.value || "__unset__"} role="option" aria-selected={addAts === o.value}>
+                              <button
+                                type="button"
+                                className={`w-full px-2 py-1.5 text-left text-sm hover:bg-slate-50 ${
+                                  addAts === o.value ? "bg-indigo-50 text-indigo-900 font-medium" : ""
+                                }`}
+                                onClick={() => {
+                                  setAddAts(o.value);
+                                  setAddAtsMenuOpen(false);
+                                }}
+                              >
+                                {o.label}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Slug</label>
+                    <input
+                      value={addSlug}
+                      onChange={(e) => setAddSlug(e.target.value)}
+                      className="w-full border border-slate-200 rounded px-2 py-1.5 text-sm font-mono"
+                      placeholder="e.g. acme"
+                      disabled={addBusy}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Careers URL</label>
+                    <input
+                      type="url"
+                      value={addUrl}
+                      onChange={(e) => setAddUrl(e.target.value)}
+                      className="w-full border border-slate-200 rounded px-2 py-1.5 text-sm font-mono"
+                      placeholder="https://…"
+                      disabled={addBusy}
+                    />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => !addBusy && setAddOpen(false)}
+                      className="px-3 py-1.5 text-sm rounded border border-slate-200 text-slate-700 hover:bg-slate-50"
+                      disabled={addBusy}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={addBusy}
+                      className="px-3 py-1.5 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {addBusy ? "Adding…" : "Add Company"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }

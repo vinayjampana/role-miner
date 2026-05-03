@@ -362,6 +362,11 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE companies ADD COLUMN strategy_status TEXT DEFAULT 'active'")
 
     conn.execute(_DDL_USERS)
+    cur = conn.execute("PRAGMA table_info(users)")
+    user_cols = {row["name"] for row in cur.fetchall()}
+    if "password_hash" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+
     conn.execute(_DDL_SEARCH_PROFILES)
     conn.execute(_DDL_JOBS)
     conn.execute(_DDL_JOB_RUNS)
@@ -601,6 +606,40 @@ def create_user(conn: sqlite3.Connection, name: str, email: str | None = None) -
     cur = conn.execute(
         "INSERT INTO users (name, email, created_at, active_profile_id) VALUES (?, ?, ?, NULL)",
         (name.strip(), (email or "").strip() or None, now),
+    )
+    uid = int(cur.lastrowid)
+    pid = _insert_blank_profile(conn, uid, now)
+    conn.execute("UPDATE users SET active_profile_id = ? WHERE id = ?", (pid, uid))
+    conn.commit()
+    return uid
+
+
+def get_user_by_email(conn: sqlite3.Connection, email: str) -> dict | None:
+    em = (email or "").strip()
+    if not em:
+        return None
+    cur = conn.execute(
+        "SELECT * FROM users WHERE email IS NOT NULL AND lower(trim(email)) = lower(trim(?))",
+        (em,),
+    )
+    row = cur.fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def set_user_password(conn: sqlite3.Connection, user_id: int, password_hash: str) -> None:
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+    conn.commit()
+
+
+def create_user_with_password(conn: sqlite3.Connection, name: str, email: str, password_hash: str) -> int:
+    now = datetime.now(tz=timezone.utc).isoformat()
+    em = (email or "").strip() or None
+    cur = conn.execute(
+        """
+        INSERT INTO users (name, email, created_at, active_profile_id, password_hash)
+        VALUES (?, ?, ?, NULL, ?)
+        """,
+        (name.strip(), em, now, password_hash),
     )
     uid = int(cur.lastrowid)
     pid = _insert_blank_profile(conn, uid, now)
