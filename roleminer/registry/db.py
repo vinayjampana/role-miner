@@ -280,6 +280,16 @@ SEED_COMPANIES: list[dict] = [
         "company_type": "product",
         "funding_stage": "Public",
     },
+    {
+        "name": "Vymo",
+        "domain": "vymo.com",
+        "ats_type": "custom",
+        # Public page https://jobs.vymo.com/ iframe-embeds this Darwinbox tenant URL
+        "careers_url": "https://vymopeopleconnect.darwinbox.in/ms/candidate/careers",
+        "hq_city": "Bangalore",
+        "company_type": "product",
+        "funding_stage": "Series C",
+    },
     # ----- Workday tenants -----
     {
         "name": "PayPal",

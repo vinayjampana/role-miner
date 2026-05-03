@@ -77,8 +77,21 @@ export interface Company {
 
 const j = async <T>(p: Promise<Response>): Promise<T> => {
   const r = await p;
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try {
+      const b = await r.json();
+      if (typeof b?.detail === "string") {
+        msg = b.detail;
+      } else if (Array.isArray(b?.detail)) {
+        msg = b.detail.map((x: { msg?: string }) => x.msg || JSON.stringify(x)).join("; ");
+      }
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return r.json() as Promise<T>;
 };
 
 export interface SearchProfile {
@@ -170,6 +183,15 @@ export const api = {
   trigger: () => j<{ run_id: number }>(authFetch("/api/trigger", { method: "POST" })),
   stats: () => j<any>(authFetch("/api/stats")),
   companies: () => j<Company[]>(authFetch("/api/companies")),
+  /** Partial PATCH: only include keys you want to change. */
+  patchCompany: (id: number, body: { careers_url?: string; ats_type?: string }) =>
+    j<Company>(
+      authFetch(`/api/companies/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    ),
   scrapeCompany: (id: number) =>
     j<{ run_id: number }>(
       authFetch(`/api/companies/${id}/scrape`, { method: "POST" })

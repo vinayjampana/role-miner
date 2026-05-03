@@ -1,6 +1,32 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Company, type DiscoverResult } from "../api/client";
+
+/** Mirrors server ALLOWED_ATS_TYPES + unset for DB null */
+const ATS_EDIT_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Unset (auto on scrape)" },
+  { value: "ashby", label: "ashby" },
+  { value: "custom", label: "custom" },
+  { value: "custom_api", label: "custom_api" },
+  { value: "cutshort", label: "cutshort" },
+  { value: "greenhouse", label: "greenhouse" },
+  { value: "lever", label: "lever" },
+  { value: "smartrecruiters", label: "smartrecruiters" },
+  { value: "workday", label: "workday" },
+];
+
+function atsSelectOptions(current: string | null): { value: string; label: string }[] {
+  const cur = (current || "").trim();
+  if (cur && !ATS_EDIT_OPTIONS.some((o) => o.value === cur)) {
+    return [{ value: cur, label: `${cur} (current)` }, ...ATS_EDIT_OPTIONS];
+  }
+  return ATS_EDIT_OPTIONS;
+}
+
+function atsOptionLabel(value: string, stored: string | null): string {
+  const o = atsSelectOptions(stored).find((x) => x.value === value);
+  return o?.label ?? (value || "Unset");
+}
 
 function formatAts(c: Company): string {
   const t = c.ats_type || "—";
@@ -126,9 +152,38 @@ function DiscoverPanel({ onAdded }: { onAdded: () => void }) {
   );
 }
 
-function CompanyRow({ c, onScraped, onNavigateToRun }: { c: Company; onScraped: () => void; onNavigateToRun: (runId: number) => void }) {
+function CompanyRow({
+  c,
+  onScraped,
+  onNavigateToRun,
+}: {
+  c: Company;
+  onScraped: () => void;
+  onNavigateToRun: (runId: number) => void;
+}) {
   const [scraping, setScraping] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [editingUrl, setEditingUrl] = useState(false);
+  const [urlDraft, setUrlDraft] = useState("");
+  const [urlSaving, setUrlSaving] = useState(false);
+  const [urlError, setUrlError] = useState<string | null>(null);
+  const [editingAts, setEditingAts] = useState(false);
+  const [atsDraft, setAtsDraft] = useState("");
+  const [atsSaving, setAtsSaving] = useState(false);
+  const [atsError, setAtsError] = useState<string | null>(null);
+  const [atsMenuOpen, setAtsMenuOpen] = useState(false);
+  const atsMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!atsMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (atsMenuRef.current && !atsMenuRef.current.contains(e.target as Node)) {
+        setAtsMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [atsMenuOpen]);
 
   const run = async () => {
     setScraping(true);
@@ -148,6 +203,59 @@ function CompanyRow({ c, onScraped, onNavigateToRun }: { c: Company; onScraped: 
 
   const boardHref = careersBoardUrl(c);
 
+  const startEditUrl = () => {
+    setUrlDraft(c.careers_url ?? "");
+    setUrlError(null);
+    setEditingUrl(true);
+  };
+
+  const cancelEditUrl = () => {
+    setEditingUrl(false);
+    setUrlError(null);
+  };
+
+  const saveCareersUrl = async () => {
+    setUrlSaving(true);
+    setUrlError(null);
+    try {
+      await api.patchCompany(c.id, { careers_url: urlDraft.trim() });
+      setEditingUrl(false);
+      onScraped();
+    } catch (e: unknown) {
+      setUrlError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setUrlSaving(false);
+    }
+  };
+
+  const startEditAts = () => {
+    setAtsDraft((c.ats_type ?? "").trim());
+    setAtsError(null);
+    setAtsMenuOpen(false);
+    setEditingAts(true);
+  };
+
+  const cancelEditAts = () => {
+    setEditingAts(false);
+    setAtsMenuOpen(false);
+    setAtsError(null);
+  };
+
+  const saveAtsType = async () => {
+    setAtsSaving(true);
+    setAtsError(null);
+    try {
+      await api.patchCompany(c.id, { ats_type: atsDraft });
+      setEditingAts(false);
+      setAtsMenuOpen(false);
+      onScraped();
+    } catch (e: unknown) {
+      setAtsError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setAtsSaving(false);
+    }
+  };
+
   return (
     <tr className="border-b border-slate-100 hover:bg-slate-50/80">
       <td className="px-3 py-2 align-top">
@@ -156,7 +264,81 @@ function CompanyRow({ c, onScraped, onNavigateToRun }: { c: Company; onScraped: 
           <div className="text-xs text-slate-500">{c.domain}</div>
         ) : null}
       </td>
-      <td className="px-3 py-2 align-top text-slate-700 whitespace-nowrap">{formatAts(c)}</td>
+      <td className="px-3 py-2 align-top text-slate-700 min-w-[140px]">
+        {editingAts ? (
+          <div className="space-y-1.5">
+            {/* Native <select> is clipped inside overflow-auto / overflow-hidden tables; use a popover menu. */}
+            <div className="relative z-50" ref={atsMenuRef}>
+              <button
+                type="button"
+                disabled={atsSaving}
+                onClick={() => setAtsMenuOpen((v) => !v)}
+                className="w-full max-w-[220px] flex items-center justify-between gap-1 border border-slate-200 rounded px-2 py-1.5 text-xs bg-white text-left hover:bg-slate-50 disabled:opacity-50"
+                aria-expanded={atsMenuOpen}
+                aria-haspopup="listbox"
+              >
+                <span className="truncate">{atsOptionLabel(atsDraft, c.ats_type)}</span>
+                <span className="text-slate-400 shrink-0" aria-hidden>
+                  {atsMenuOpen ? "▴" : "▾"}
+                </span>
+              </button>
+              {atsMenuOpen ? (
+                <ul
+                  role="listbox"
+                  className="absolute left-0 top-full z-50 mt-0.5 min-w-full max-h-52 overflow-y-auto rounded border border-slate-200 bg-white py-0.5 shadow-lg"
+                >
+                  {atsSelectOptions(c.ats_type).map((o) => (
+                    <li key={o.value || "__unset__"} role="option" aria-selected={atsDraft === o.value}>
+                      <button
+                        type="button"
+                        className={`w-full px-2 py-1.5 text-left text-xs hover:bg-slate-50 ${
+                          atsDraft === o.value ? "bg-indigo-50 text-indigo-900 font-medium" : ""
+                        }`}
+                        onClick={() => {
+                          setAtsDraft(o.value);
+                          setAtsMenuOpen(false);
+                        }}
+                      >
+                        {o.label}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              <button
+                type="button"
+                onClick={saveAtsType}
+                disabled={atsSaving}
+                className="px-2 py-0.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {atsSaving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={cancelEditAts}
+                disabled={atsSaving}
+                className="px-2 py-0.5 text-xs rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+            </div>
+            {atsError ? <div className="text-xs text-red-600">{atsError}</div> : null}
+          </div>
+        ) : (
+          <div className="space-y-0.5">
+            <div className="whitespace-nowrap">{formatAts(c)}</div>
+            <button
+              type="button"
+              onClick={startEditAts}
+              className="text-xs text-indigo-600 hover:underline font-medium"
+            >
+              Change ATS
+            </button>
+          </div>
+        )}
+      </td>
       <td className="px-3 py-2 align-top text-slate-700">{c.hq_city || "—"}</td>
       <td className="px-3 py-2 align-top text-slate-700">{c.company_type || "—"}</td>
       <td className="px-3 py-2 align-top text-slate-700">{c.funding_stage || "—"}</td>
@@ -187,18 +369,72 @@ function CompanyRow({ c, onScraped, onNavigateToRun }: { c: Company; onScraped: 
             })
           : "—"}
       </td>
-      <td className="px-3 py-2 align-top">
-        {boardHref ? (
-          <a
-            href={boardHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sky-700 hover:underline text-xs"
-          >
-            Open
-          </a>
+      <td className="px-3 py-2 align-top max-w-[min(360px,40vw)]">
+        {editingUrl ? (
+          <div className="space-y-1.5">
+            <input
+              type="url"
+              value={urlDraft}
+              onChange={(e) => setUrlDraft(e.target.value)}
+              placeholder="https://… (empty to clear)"
+              className="w-full min-w-[200px] border border-slate-200 rounded px-2 py-1 text-xs font-mono"
+              disabled={urlSaving}
+            />
+            <div className="flex flex-wrap gap-1">
+              <button
+                type="button"
+                onClick={saveCareersUrl}
+                disabled={urlSaving}
+                className="px-2 py-0.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {urlSaving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={cancelEditUrl}
+                disabled={urlSaving}
+                className="px-2 py-0.5 text-xs rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+            </div>
+            {urlError ? <div className="text-xs text-red-600">{urlError}</div> : null}
+          </div>
         ) : (
-          "—"
+          <div className="space-y-1">
+            {c.careers_url ? (
+              <a
+                href={c.careers_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sky-700 hover:underline text-xs block truncate"
+                title={c.careers_url}
+              >
+                {c.careers_url}
+              </a>
+            ) : (
+              <span className="text-xs text-slate-400">No URL stored</span>
+            )}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              {boardHref ? (
+                <a
+                  href={boardHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sky-600 hover:underline text-xs"
+                >
+                  Open board
+                </a>
+              ) : null}
+              <button
+                type="button"
+                onClick={startEditUrl}
+                className="text-xs text-indigo-600 hover:underline font-medium"
+              >
+                Edit URL
+              </button>
+            </div>
+          </div>
         )}
       </td>
       <td className="px-3 py-2 align-top">
@@ -245,6 +481,7 @@ export function Companies({ onNavigateToRun }: { onNavigateToRun: (runId: number
         c.name,
         c.domain,
         c.ats_slug,
+        c.careers_url,
         c.hq_city,
         c.company_type,
         c.funding_stage,
@@ -303,7 +540,7 @@ export function Companies({ onNavigateToRun }: { onNavigateToRun: (runId: number
       )}
 
       <div className="flex-1 overflow-auto p-4">
-        <div className="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
+        <div className="bg-white border border-slate-200 rounded-lg shadow-sm">
           <table className="w-full text-sm border-collapse">
             <thead>
               <tr className="bg-slate-50 text-left text-slate-600 border-b border-slate-200">
@@ -314,7 +551,7 @@ export function Companies({ onNavigateToRun }: { onNavigateToRun: (runId: number
                 <th className="px-3 py-2 font-semibold">Funding</th>
                 <th className="px-3 py-2 font-semibold">Tech stack</th>
                 <th className="px-3 py-2 font-semibold">Last scraped</th>
-                <th className="px-3 py-2 font-semibold">Careers</th>
+                <th className="px-3 py-2 font-semibold">Careers URL</th>
                 <th className="px-3 py-2 font-semibold">Scrape</th>
               </tr>
             </thead>

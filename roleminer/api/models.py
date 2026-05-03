@@ -157,6 +157,21 @@ class JobClickBody(BaseModel):
     url: str
 
 
+class CompanyPatch(BaseModel):
+    """Partial update: only fields sent in the JSON body are applied."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    careers_url: str | None = Field(
+        default=None,
+        description="Omit to leave unchanged; empty string clears careers_url.",
+    )
+    ats_type: str | None = Field(
+        default=None,
+        description="Omit to leave unchanged; empty string clears ats_type (auto-detect on scrape).",
+    )
+
+
 class CompanyOut(BaseModel):
     id: int
     name: str

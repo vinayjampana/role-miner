@@ -12,7 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 
 import config
 from roleminer.api.dependencies import active_runs, get_db
-from roleminer.api.models import CompanyOut, DiscoverRequest, TriggerResponse
+from roleminer.api.models import CompanyOut, CompanyPatch, DiscoverRequest, TriggerResponse
 from roleminer.registry.career_finder import discover_companies
 from roleminer.registry.db import (
     get_all_companies,
@@ -21,11 +21,24 @@ from roleminer.registry.db import (
     insert_run_event,
     update_run,
     update_last_scraped,
+    update_company_fields,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["companies"])
+
+# Must match branches in main._scrape_company
+ALLOWED_ATS_TYPES = frozenset({
+    "greenhouse",
+    "lever",
+    "ashby",
+    "smartrecruiters",
+    "workday",
+    "cutshort",
+    "custom",
+    "custom_api",
+})
 
 
 def _parse_tech_stack(raw: str | None) -> list[str]:
@@ -43,27 +56,68 @@ def _parse_tech_stack(raw: str | None) -> list[str]:
 @router.get("/companies", response_model=list[CompanyOut])
 def list_companies(db: sqlite3.Connection = Depends(get_db)):
     rows = get_all_companies(db)
-    out: list[CompanyOut] = []
-    for r in rows:
-        out.append(
-            CompanyOut(
-                id=r["id"],
-                name=r["name"],
-                domain=r.get("domain"),
-                ats_type=r.get("ats_type"),
-                careers_url=r.get("careers_url"),
-                ats_slug=r.get("ats_slug"),
-                tech_stack=_parse_tech_stack(r.get("tech_stack")),
-                location=r.get("location"),
-                hq_city=r.get("hq_city"),
-                size_category=r.get("size_category"),
-                company_type=r.get("company_type"),
-                funding_stage=r.get("funding_stage"),
-                last_scraped_at=r.get("last_scraped_at"),
-                embedding_id=r.get("embedding_id"),
-            )
-        )
+    out = [_row_to_company_out(r) for r in rows]
     return sorted(out, key=lambda c: c.name.lower())
+
+
+def _row_to_company_out(row: sqlite3.Row | dict) -> CompanyOut:
+    r = dict(row)
+    return CompanyOut(
+        id=r["id"],
+        name=r["name"],
+        domain=r.get("domain"),
+        ats_type=r.get("ats_type"),
+        careers_url=r.get("careers_url"),
+        ats_slug=r.get("ats_slug"),
+        tech_stack=_parse_tech_stack(r.get("tech_stack")),
+        location=r.get("location"),
+        hq_city=r.get("hq_city"),
+        size_category=r.get("size_category"),
+        company_type=r.get("company_type"),
+        funding_stage=r.get("funding_stage"),
+        last_scraped_at=r.get("last_scraped_at"),
+        embedding_id=r.get("embedding_id"),
+    )
+
+
+@router.patch("/companies/{company_id}", response_model=CompanyOut)
+def patch_company(
+    company_id: int,
+    body: CompanyPatch,
+    db: sqlite3.Connection = Depends(get_db),
+):
+    row = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "company not found")
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(422, "provide careers_url and/or ats_type")
+    updates: dict = {}
+    if "careers_url" in data:
+        raw = (data["careers_url"] or "").strip()
+        if raw and not (raw.startswith("http://") or raw.startswith("https://")):
+            raise HTTPException(
+                422,
+                "careers_url must start with http:// or https://, or be empty to clear",
+            )
+        updates["careers_url"] = raw or None
+    if "ats_type" in data:
+        raw_ats = (data["ats_type"] or "").strip().lower()
+        if not raw_ats:
+            updates["ats_type"] = None
+        elif raw_ats not in ALLOWED_ATS_TYPES:
+            raise HTTPException(
+                422,
+                "ats_type must be empty to clear, or one of: "
+                + ", ".join(sorted(ALLOWED_ATS_TYPES)),
+            )
+        else:
+            updates["ats_type"] = raw_ats
+    update_company_fields(db, company_id, updates)
+    row2 = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    if not row2:
+        raise HTTPException(404, "company not found")
+    return _row_to_company_out(row2)
 
 
 @router.post("/companies/{company_id}/scrape", response_model=TriggerResponse)
