@@ -14,6 +14,7 @@ from roleminer.api.routes import companies, jobs, preferences, runs, stats, stre
 
 logger = logging.getLogger(__name__)
 
+_API_PREFIX = "/api"
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 
@@ -36,13 +37,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(jobs.router)
-app.include_router(users.router)
-app.include_router(companies.router)
-app.include_router(runs.router)
-app.include_router(stream.router)
-app.include_router(stats.router)
-app.include_router(preferences.router)
+app.include_router(jobs.router, prefix=_API_PREFIX)
+app.include_router(users.router, prefix=_API_PREFIX)
+app.include_router(companies.router, prefix=_API_PREFIX)
+app.include_router(runs.router, prefix=_API_PREFIX)
+app.include_router(stream.router, prefix=_API_PREFIX)
+app.include_router(stats.router, prefix=_API_PREFIX)
+app.include_router(preferences.router, prefix=_API_PREFIX)
 
 
 @app.get("/health")
