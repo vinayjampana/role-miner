@@ -22,8 +22,11 @@ Personal tool for Vinay to find relevant senior engineering roles in India. Not 
 - **Wellfound MUST use India location filter** — without it skews US-heavy
 - **Naukri**: email parse first, browser scrape fallback only if coverage insufficient
 - **Service company filter is rule-based**, not LLM
-- **Single LLM call per run** — batch score top 50 jobs, structured JSON output
+- **Single LLM call per run** — batch score top 50 jobs, structured JSON output; **plus** `validate_custom_scrape()` cheap call (≤80 tokens, `DISCOVER_MODEL`) after custom Playwright scrape to reject nav/marketing garbage
 - All scrapers return same `Job` dataclass — decoupled from pipeline
+- **Custom scraper strategy order**: (0) XHR network intercept (SPA/React) → (1) embedded JSON (`__NEXT_DATA__`) → (2) job card DOM selectors → (3) link heuristics → zero-job fallback: `find_redirect_via_cta` to discover real portal URL and update DB
+- **`_looks_like_job_title`**: whole-word regex (`_JOB_KEYWORD_RE`), max 10 words, `_MARKETING_RE` + `_CONTENT_SUFFIX_RE` guards — no substring matching; ambiguous single words (product/data/sales) require a qualifying role word
+- **browser_detect Signal 5**: `_JOB_PORTAL_RE` matches 20+ unsupported ATS portals (trakstar, workable, breezy, recruitee, iCIMS, Taleo, BambooHR, etc.) in `<a href>` scan — updates `careers_url` to real listing page even for unknown ATS
 - **LLM config via env**: `LLM_API_KEY`, `LLM_BASE_URL`, `SCORING_MODEL` — no hardcoded provider
 - **run_events table**: every pipeline step logged to SQLite with timing + errors — drives SSE stream and RunLogs UI; **dedup_done** + filter/rank/score events include **capped job snapshots** (`jobs` / `jobs_passed` / `jobs_ranked` / `jobs_scored_detail`) for debugging; server logs **`[pipeline] run_id=…`** summaries per step
 - **Scraper freshness**: `SCRAPER_FRESHNESS_HOURS` (default 24h) — skip companies scraped recently; emits `scraper_skipped` event

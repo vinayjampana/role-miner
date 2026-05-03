@@ -4,6 +4,12 @@ Personal job discovery tool for senior engineering roles in India. Scrapes multi
 
 ## Recent updates (since last release commit)
 
+- **Custom scraper — SPA network intercept**: Playwright now intercepts XHR/fetch responses during page load (Strategy 0) to capture job API calls from React/Next.js career pages (e.g. Upstox). Captures same-domain JSON responses, replays via `page.request`, parses with `_extract_job_items`. Runs before DOM strategies.
+- **Custom scraper — redirect discovery**: When 0 jobs scraped, `find_redirect_via_cta` uses Playwright to find the real job portal URL — Phase 1 scans `<a href>` links by CTA text or known portal domain (`_JOB_PORTAL_RE`); Phase 2 clicks buttons and captures popup/navigation URL. Updates `careers_url` in DB for future runs. Handles pages like `whatfix.com/careers` → `whatfix101.hire.trakstar.com`.
+- **browser_detect Signal 5**: Extends `detect_ats_with_browser` to capture hrefs to 20+ unsupported job portals (trakstar, workable, breezy, recruitee, iCIMS, Taleo, BambooHR, teamtailor, Keka, Darwinbox, etc.) even when no known ATS is detected. Updates `careers_url` in DB so next scrape targets the real listing page.
+- **`_looks_like_job_title` rewrite**: Whole-word regex (`_JOB_KEYWORD_RE`) instead of substring matching — fixes false positives like "productivity" → "product", "Managers" → "manager", "analytics" → "analyst". Adds word-count cap (> 10 words rejected), `_MARKETING_RE` (kills testimonials/CTAs), `_CONTENT_SUFFIX_RE` (kills "Analyst Reports", "Developer Hub"). Tested against 27 pass/fail cases.
+- **`_walk_json_for_jobs` fix**: Now applies `_looks_like_job_title` before emitting a job from Next.js page metadata — stops page titles like "Home", "Whatfix" from becoming job entries.
+- **LLM scrape validation**: `validate_custom_scrape()` in `scorer.py` — cheap LLM call (≤80 tokens, uses `DISCOVER_MODEL` free tier) after custom Playwright scrape; detects nav/marketing garbage that slips past rules; fails open (valid=True) on API error.
 - **Custom career sites**: Playwright-based DOM scraper with pagination; **proprietary JSON APIs** discovered from JS bundles (`custom_api` ATS type), including split-bundle heuristics (e.g. Cars24 via `careers.{domain}` fallback and `*.team` API hosts). `job_api_discover` module; Docker image installs Playwright browsers.
 - **SmartRecruiters**: New scraper + ATS detection; **Freshworks** seed uses `https://careers.smartrecruiters.com/Freshworks`.
 - **Resolve / detect**: JS chunk scan for embedded ATS URLs; **Playwright fallback** (`browser_detect`) when static HTML has no board URL; Workday human URLs normalized to CXS where applicable.
@@ -126,6 +132,7 @@ All routes are under the app root (e.g. `/jobs/latest`). The API uses a lightwei
 | GET | `/stream/{run_id}` | SSE: live pipeline events (or replay from DB) |
 | GET | `/stats` | Aggregate totals + per-source job counts |
 | GET | `/companies` | All companies in registry |
+| PATCH | `/companies/{id}` | Partial update: `careers_url` and/or `ats_type` (empty string clears; `ats_type` must be a known scraper or empty) |
 | POST | `/companies/discover` | Discover career URLs for company names (SSE stream) |
 | POST | `/companies/{id}/scrape` | Scrape one registry company and run filter → embed → rank → score (returns `run_id`) |
 | GET | `/users` | List users |

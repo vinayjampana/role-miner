@@ -310,10 +310,63 @@ async def _scrape_company(
                 jobs = await custom_scraper.scrape(careers_url, company_name=name)
                 if jobs:
                     logger.info("[scrape] company=%r step=custom_playwright jobs=%d", name, len(jobs))
-                    return jobs
-                logger.info("[scrape] company=%r step=custom_playwright zero jobs", name)
+                    # Validate: LLM confirms scraped items are real job postings, not nav/page noise.
+                    # Cheap call using DISCOVER_MODEL (free tier). Only fires for custom path.
+                    from roleminer.pipeline.scorer import validate_custom_scrape
+                    valid, reason = await validate_custom_scrape(jobs, name)
+                    if valid:
+                        return jobs
+                    logger.warning(
+                        "[scrape] company=%r step=custom_playwright validation_failed reason=%r — treating as zero",
+                        name, reason,
+                    )
+                    jobs = []
+                else:
+                    logger.info("[scrape] company=%r step=custom_playwright zero jobs", name)
             except Exception as exc:
                 logger.warning("[scrape] company=%r step=custom_playwright error: %s", name, exc)
+
+        # Zero-job fallback: browser CTA detection → find the real job portal URL.
+        # Handles cases like whatfix.com/careers → whatfix101.hire.trakstar.com
+        # where the careers page is a landing page that links/redirects to an external ATS.
+        if careers_url:
+            try:
+                from roleminer.registry.browser_detect import find_redirect_via_cta
+                redirect = await find_redirect_via_cta(careers_url)
+                if redirect and redirect.rstrip("/") != careers_url.rstrip("/"):
+                    logger.info("[scrape] company=%r step=zero_job_redirect found=%s", name, redirect)
+                    new_det = detect_ats_from_url(redirect)
+                    if conn and cid:
+                        patch: dict = {"careers_url": redirect}
+                        if new_det:
+                            patch["ats_type"] = new_det[0]
+                            if new_det[1]:
+                                patch["ats_slug"] = new_det[1]
+                        update_company_fields(conn, cid, patch)
+                        company.update(patch)
+                    if new_det:
+                        new_ats, new_sl = new_det[0], (new_det[1] or "").strip()
+                        if new_ats == "greenhouse":
+                            jobs = await greenhouse.scrape(new_sl, session, company_name=name)
+                        elif new_ats == "lever":
+                            jobs = await lever.scrape(new_sl, session, company_name=name)
+                        elif new_ats == "ashby":
+                            jobs = await ashby.scrape(new_sl, session, company_name=name)
+                        elif new_ats == "smartrecruiters":
+                            jobs = await smartrecruiters.scrape(new_sl, session, company_name=name)
+                        elif new_ats == "workday":
+                            jobs = await workday.scrape(redirect, session, company_name=name)
+                        else:
+                            jobs = await custom_scraper.scrape(redirect, company_name=name)
+                    else:
+                        jobs = await custom_scraper.scrape(redirect, company_name=name)
+                    if jobs:
+                        logger.info("[scrape] company=%r step=zero_job_redirect jobs=%d", name, len(jobs))
+                        return jobs
+                    logger.info("[scrape] company=%r step=zero_job_redirect still_zero", name)
+            except Exception as exc:
+                logger.warning("[scrape] company=%r step=zero_job_redirect error: %s", name, exc)
+
         logger.warning(
             "[scrape] company=%r step=abort reason=no_ats_slug ats_type=%r careers_url=%s",
             name,

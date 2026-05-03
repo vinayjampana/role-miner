@@ -170,3 +170,71 @@ async def score_jobs(
 
     logger.info("Scored %d jobs | tokens=%d | cost=$%.6f", len(all_scored), total_tokens, total_cost)
     return all_scored, total_tokens, total_cost
+
+
+_VALIDATE_SYSTEM = (
+    "You are a job data quality checker. "
+    "Determine if a list of scraped items are real job postings or web page noise "
+    "(navigation links, page titles, company names, marketing copy). "
+    "Reply with JSON only: {\"valid\": bool, \"reason\": \"one sentence\"}"
+)
+
+
+async def validate_custom_scrape(
+    jobs: list[Job],
+    company_name: str,
+    model: str = "",
+    api_key: str = "",
+) -> tuple[bool, str]:
+    """
+    LLM quality check for custom-scraped jobs.
+
+    Returns (valid, reason). If LLM call fails, defaults to valid=True
+    so we don't discard potentially good results on API errors.
+
+    Only called when rule-based heuristics suggest results may be garbage
+    (e.g. titles with no job keywords slipped through JSON extraction).
+    """
+    if not jobs:
+        return False, "no jobs scraped"
+
+    effective_key = api_key or os.getenv("LLM_API_KEY", "")
+    if not effective_key:
+        logger.warning("[validate] LLM_API_KEY not set — skipping validation")
+        return True, "skipped (no api key)"
+
+    _model = model or os.getenv("DISCOVER_MODEL", os.getenv("SCORING_MODEL", ""))
+    client_kwargs: dict[str, Any] = {"api_key": effective_key}
+    base_url = os.getenv("LLM_BASE_URL", "")
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = AsyncOpenAI(**client_kwargs)
+
+    titles = "\n".join(f"- {j.title}" for j in jobs[:20])
+    user_msg = (
+        f"Company: {company_name}\n"
+        f"Scraped titles:\n{titles}\n\n"
+        "Are these actual job postings (roles like 'Senior Engineer', 'Product Manager') "
+        "or website noise (nav links, page titles, marketing copy)?"
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model=_model,
+            messages=[
+                {"role": "system", "content": _VALIDATE_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.0,
+            max_tokens=80,
+        )
+        raw = resp.choices[0].message.content or ""
+        cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
+        parsed = json.loads(cleaned)
+        valid = bool(parsed.get("valid", True))
+        reason = str(parsed.get("reason", ""))
+        logger.info("[validate] company=%r valid=%s reason=%s", company_name, valid, reason)
+        return valid, reason
+    except Exception as exc:
+        logger.warning("[validate] LLM call failed for %r: %s — treating as valid", company_name, exc)
+        return True, f"llm_error: {exc}"

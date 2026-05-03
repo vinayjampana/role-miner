@@ -285,6 +285,36 @@ def _pluck_location(d: dict) -> str:
     return ""
 
 
+def _jobs_from_api_items(items: list[dict], base_url: str, company_name: str) -> list[Job]:
+    """Convert raw API job dicts → Job objects. Applies _looks_like_job_title filter."""
+    jobs: list[Job] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = _pluck(item, _JOB_TITLE_KEYS)
+        if not title or not _looks_like_job_title(title):
+            continue
+        location = _pluck_location(item)
+        job_url = _pluck(item, _JOB_URL_KEYS) or base_url
+        if job_url and not job_url.startswith("http"):
+            job_url = urljoin(base_url, job_url)
+        if job_url in seen:
+            continue
+        seen.add(job_url)
+        jobs.append(Job(
+            title=_clean_title(title),
+            company=company_name,
+            url=job_url,
+            date_posted=datetime.now(tz=timezone.utc).isoformat(),
+            location=location,
+            source="custom",
+            work_mode=_detect_work_mode(f"{title} {location}"),
+            jd_text="",
+        ))
+    return jobs
+
+
 async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
     if not careers_url or not careers_url.strip():
         return []
@@ -298,6 +328,9 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
     url = careers_url.strip()
     logger.info("[custom-scrape] start url=%s company=%s", url, company_name)
 
+    from urllib.parse import urlparse as _urlparse
+    _input_domain = ".".join(_urlparse(url).netloc.lower().split(".")[-2:])
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         try:
@@ -310,6 +343,31 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
             )
             page = await ctx.new_page()
 
+            # Strategy 0: capture XHR/fetch responses that look like job API calls.
+            # React/Next.js SPAs load jobs via API — intercept before page.goto().
+            _captured_api_urls: list[str] = []
+
+            def _on_response(response):
+                if response.status >= 400:
+                    return
+                ct = (response.headers.get("content-type") or "").lower()
+                if "json" not in ct:
+                    return
+                resp_host = _urlparse(response.url).netloc.lower()
+                # Same company domain only (skip CDNs, analytics, etc.)
+                if not resp_host.endswith(_input_domain):
+                    return
+                resp_url_lower = response.url.lower()
+                # Skip asset/tracking URLs
+                if any(x in resp_url_lower for x in [
+                    ".js", ".css", ".map", "/analytics", "/tracking",
+                    "/metrics", "/telemetry", "/log", "/pixel",
+                ]):
+                    return
+                _captured_api_urls.append(response.url)
+
+            page.on("response", _on_response)
+
             try:
                 await page.goto(url, timeout=_TIMEOUT_MS, wait_until="domcontentloaded")
                 try:
@@ -321,9 +379,33 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
                 return []
 
             final_url = page.url
-            logger.info("[custom-scrape] page loaded final_url=%s", final_url)
+            logger.info(
+                "[custom-scrape] page loaded final_url=%s captured_api_urls=%d",
+                final_url, len(_captured_api_urls),
+            )
 
-            # Try embedded JSON first (fastest, most reliable)
+            # Try intercepted API responses first (most reliable for SPAs)
+            if _captured_api_urls:
+                for api_url in _captured_api_urls:
+                    try:
+                        api_resp = await page.request.get(api_url)
+                        if not api_resp.ok:
+                            continue
+                        data = await api_resp.json()
+                        items = _extract_job_items(data)
+                        if not items:
+                            continue
+                        jobs = _jobs_from_api_items(items, api_url, company_name)
+                        if jobs:
+                            logger.info(
+                                "[custom-scrape] %d jobs via network-intercept api_url=%s",
+                                len(jobs), api_url,
+                            )
+                            return jobs
+                    except Exception as exc:
+                        logger.debug("[custom-scrape] network-intercept fetch failed %s: %s", api_url, exc)
+
+            # Try embedded JSON next (Next.js __NEXT_DATA__, ld+json)
             json_jobs = await _extract_from_json(page, final_url, company_name)
             if json_jobs:
                 logger.info("[custom-scrape] found %d jobs via embedded JSON", len(json_jobs))
@@ -333,7 +415,6 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
             clicks = await _paginate(page)
             logger.info("[custom-scrape] pagination clicks=%d", clicks)
 
-            # Extract from rendered DOM
             # Strategy 1: job card elements
             job_cards = await _extract_job_cards(page, final_url, company_name)
             if job_cards:
@@ -538,7 +619,8 @@ def _walk_json_for_jobs(data, base_url: str, company_name: str, depth: int = 0) 
             title = v
             break
 
-    if not title:
+    if not title or not _looks_like_job_title(title):
+        # No recognisable job title — recurse into child values before giving up
         for item in data.values():
             results = _walk_json_for_jobs(item, base_url, company_name, depth + 1)
             if results:
@@ -586,28 +668,78 @@ _TITLE_BLACKLIST = re.compile(
     re.IGNORECASE,
 )
 
+# Whole-word job keyword matching. Excludes ambiguous single words (product, data,
+# sales, marketing) that also appear in nav/marketing copy — those require a qualifier.
+_JOB_KEYWORD_RE = re.compile(
+    r"\b(?:"
+    r"engineer(?:ing)?"
+    r"|developer|programmer"
+    r"|manager"
+    r"|analyst"
+    r"|designer"
+    r"|director"
+    r"|lead"
+    r"|senior|sr\b"
+    r"|junior|jr\b"
+    r"|associate"
+    r"|intern(?:ship)?"
+    r"|head\s+of"
+    r"|vp\b"
+    r"|chief\b"
+    r"|executive"
+    r"|consultant"
+    r"|specialist"
+    r"|architect"
+    r"|scientist"
+    r"|software"
+    r"|frontend|back[\-\s]?end|full[\-\s]?stack"
+    r"|devops|sre\b"
+    r"|qa\b|tester?"
+    r"|sde\b"
+    r"|staff"
+    r"|principal"
+    r"|officer"
+    r"|recruiter"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Marketing/testimonial phrases that indicate the text is NOT a job title.
+_MARKETING_RE = re.compile(
+    r"\b(?:learn\s+more|talk\s+to|call\s+us|get\s+started|sign\s+up|"
+    r"watch\s+(?:now|video)|discover|accelerate|unlock|resolve[sd]?|"
+    r"enable[sd]?|increase[sd]?|track\s+usage|analyze|identify|optimize|"
+    r"platform|solution[s]?|productivity|workflow[s]?|guidance|support\s+question|"
+    r"resolved\s+\d|increase\s+their|learn\s+how|see\s+how)\b",
+    re.IGNORECASE,
+)
+
+# Job keyword followed by a content-category noun = section heading, not a job title.
+# e.g. "Analyst Reports", "Engineer Blog", "Developer Hub"
+_CONTENT_SUFFIX_RE = re.compile(
+    r"\b(?:reports?|blogs?|hubs?|portals?|tools?|templates?|guides?|resources?|"
+    r"updates?|newsletters?|programs?|communities?|events?|webinars?|awards?|"
+    r"forums?|councils?|partnerships?|alliances?)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _looks_like_job_title(text: str) -> bool:
     text = text.strip()
-    if len(text) < 5 or len(text) > 200:
+    word_count = len(text.split())
+    if len(text) < 5 or len(text) > 150:
+        return False
+    if word_count > 10:
         return False
     if _TITLE_BLACKLIST.match(text):
         return False
     if text.lower().startswith("http"):
         return False
-    return any(
-        w in text.lower()
-        for w in [
-            "engineer", "developer", "manager", "analyst", "designer",
-            "director", "lead", "senior", "associate", "intern",
-            "head", "vp", "chief", "executive", "consultant",
-            "specialist", "architect", "scientist", "product",
-            "data", "software", "frontend", "backend", "fullstack",
-            "full stack", "devops", "sre", "qa", "test",
-            "sales", "marketing", "operations", "finance",
-            "sde", "staff", "principal", "officer",
-        ]
-    )
+    if _MARKETING_RE.search(text):
+        return False
+    if _CONTENT_SUFFIX_RE.search(text):
+        return False
+    return bool(_JOB_KEYWORD_RE.search(text))
 
 
 def _clean_title(text: str) -> str:
