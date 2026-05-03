@@ -3,10 +3,10 @@
 - India-first job discovery tool; scrapes Greenhouse + Workday (V1), scores vs candidate profile, surfaces ranked shortlist
 - CLI (`main.py`) → scrape → fuzzy dedup → filter → embed → rank → LLM-score → FastAPI + React UI
 - Key components: `scrapers/`, `registry/`, `pipeline/`, `api/`, `frontend/`
-- Data store: SQLite (`db.py`) + ChromaDB (`vector_store.py`)
+- Data store: SQLite (`db.py`) + ChromaDB (`vector_store.py`; persist dir via `CHROMA_PATH` env, see `config.py`)
 - LLM: any OpenAI-compatible API; embeddings via OpenRouter
 - Events: every pipeline step → `run_events` table → SSE stream → RunLogs UI
-- Identity: optional `X-User-Id` header; per-user profiles + job tracker
+- Identity: JWT `Authorization: Bearer` (signed with `APP_SECRET`, default dev fallback in code); optional legacy `X-User-Id` only when `APP_SECRET` is unset/empty. Registration uses `REGISTRATION_TOKEN`. Per-user profiles + job tracker
 
 ## V1 SCOPE (ACTIVE)
 
@@ -28,9 +28,10 @@
 → Then: /docs/llm/modules/scrapers.md
 
 ## Add a company to scrape
-→ Edit: `roleminer/registry/data/companies.json`
-→ Format: `{"company": "Name", "ats": "greenhouse|workday", "slug": "...", "careers_url": "..."}`
-→ Greenhouse needs `slug`; Workday needs `careers_url` (the `/wday/cxs/...` endpoint)
+→ **Registry (CLI / static)**: edit `roleminer/registry/data/companies.json`
+→ Format: `{"company": "Name", "ats": "greenhouse|workday|…", "slug": "...", "careers_url": "..."}`
+→ **API / UI**: `POST /api/companies` (auth required when JWT mode on). Allowed `ats_type` for create/patch: `greenhouse`, `lever`, `ashby`, `workday` (slug vs `careers_url` rules match ATS expectations)
+→ Greenhouse / Lever / Ashby: `slug`; Workday: `careers_url` (CXS-style URL)
 
 ## Add or modify pipeline step (filter / rank / score)
 → Read: /docs/llm/extension-guide.md
@@ -39,6 +40,13 @@
 ## Add or modify an API route
 → Read: /docs/llm/extension-guide.md
 → Then: /docs/llm/modules/api.md
+
+## Understand authentication (JWT, registration, legacy header)
+→ Read: `roleminer/api/auth.py` (`get_current_user`), `roleminer/api/routes/auth.py` (`/auth/register`, `/auth/login`, `/auth/me`)
+→ Env: `APP_SECRET`, `REGISTRATION_TOKEN`; users table may include `password_hash` (see `db.py` migrations)
+
+## ChromaDB storage path
+→ Env: `CHROMA_PATH` (optional override). Default under `roleminer/registry/chroma`. Used by `vector_store.get_client()`
 
 ## Debug a failed run or missing jobs
 → Read: /docs/llm/debugging.md
@@ -93,7 +101,7 @@
 | `modules/scrapers.md` | Per-ATS scraper logic; custom strategy order; `Job` dataclass |
 | `modules/registry.md` | ATS detect, career_finder, browser_detect, vector_store, db CRUD |
 | `modules/pipeline.md` | filter, role_filter, embedder, ranker, scorer internals |
-| `modules/api.md` | FastAPI routes, auth, models, SSE stream |
+| `modules/api.md` | FastAPI routes, JWT + legacy auth, models, SSE stream |
 | `modules/frontend.md` | React views, API client, IST formatting, tracker UI |
 
 ---
@@ -108,7 +116,10 @@
 | `roleminer/scrapers/greenhouse.py` | Greenhouse HTTP scraper (active) |
 | `roleminer/scrapers/workday.py` | Workday HTTP scraper (active) |
 | `roleminer/scrapers/custom.py` | Playwright scraper — Playwright fallback only in V1 |
-| `roleminer/registry/db.py` | SQLite CRUD + `get_freshness_by_name` + `set_freshness_by_name` |
+| `roleminer/registry/db.py` | SQLite CRUD + users/password_hash + `get_freshness_by_name` + `set_freshness_by_name` |
+| `roleminer/api/routes/auth.py` | `POST /auth/register`, `/auth/login`, `GET /auth/me` |
+| `roleminer/api/auth.py` | JWT Bearer + legacy `X-User-Id` when `APP_SECRET` unset |
+| `config.py` | `DB_PATH`, `CHROMA_PATH`, `COMPANIES_JSON_PATH`, env merge |
 | `main.py` | Pipeline orchestration; `_scrape_company` routes greenhouse/workday |
 
 ---
