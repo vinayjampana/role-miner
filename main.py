@@ -49,6 +49,7 @@ from roleminer.pipeline import embedder
 from roleminer.scrapers.base import Job, dedup_by_url, make_session
 from roleminer.scrapers import greenhouse, lever, ashby, cutshort, workday, smartrecruiters
 from roleminer.scrapers import custom as custom_scraper
+from roleminer.scrapers import dynamic as dynamic_scraper
 from roleminer.pipeline.classifier import classify_company
 from roleminer.pipeline.filter import (
     filter_jobs, detect_work_mode, days_since,
@@ -227,6 +228,53 @@ async def _scrape_company(
         slug,
         careers_url or "(none)",
     )
+
+    # Check for active scrape_strategy from discovery agent
+    if conn and cid:
+        strategy = company.get("scrape_strategy")
+        strategy_status = company.get("strategy_status", "active")
+        if isinstance(strategy, str) and strategy:
+            try:
+                import json as _json
+                strategy = _json.loads(strategy)
+            except (Exception):
+                strategy = None
+        if strategy and strategy_status == "active":
+            logger.info(
+                "[scrape] company=%r step=dynamic_strategy type=%s",
+                name, strategy.get("strategy_type"),
+            )
+            try:
+                snapshots, http_ok = await dynamic_scraper.scrape_dynamic(
+                    company_url=careers_url or company.get("domain", ""),
+                    strategy=strategy,
+                    session=session,
+                    company_name=name,
+                )
+                jobs = []
+                for snap in snapshots:
+                    jobs.append(Job(**snap))
+            except Exception as exc:
+                logger.warning("[scrape] company=%r step=dynamic_strategy error: %s", name, exc)
+                jobs = []
+                http_ok = False
+
+            if jobs:
+                logger.info("[scrape] company=%r step=dynamic_strategy jobs=%d", name, len(jobs))
+                return jobs
+
+            # Self-healing: strategy returned 0 jobs but HTTP was OK → mark stale
+            if http_ok:
+                logger.warning(
+                    "[scrape] company=%r step=dynamic_stale 0 jobs but HTTP OK — marking strategy stale",
+                    name,
+                )
+                update_company_fields(conn, cid, {"strategy_status": "stale"})
+            else:
+                logger.warning(
+                    "[scrape] company=%r step=dynamic_failed HTTP error — falling back",
+                    name,
+                )
 
     det: tuple[str, str] | None = None
 

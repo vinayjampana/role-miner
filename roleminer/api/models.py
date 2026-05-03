@@ -187,3 +187,5 @@ class CompanyOut(BaseModel):
     funding_stage: str | None = None
     last_scraped_at: str | None = None
     embedding_id: str | None = None
+    scrape_strategy: dict | None = None
+    strategy_status: str = "active"

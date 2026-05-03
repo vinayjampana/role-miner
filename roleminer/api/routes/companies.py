@@ -22,6 +22,7 @@ from roleminer.registry.db import (
     update_run,
     update_last_scraped,
     update_company_fields,
+    upsert_company,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,13 @@ def list_companies(db: sqlite3.Connection = Depends(get_db)):
 
 def _row_to_company_out(row: sqlite3.Row | dict) -> CompanyOut:
     r = dict(row)
+    strategy = r.get("scrape_strategy")
+    if isinstance(strategy, str) and strategy:
+        try:
+            import json as _json
+            strategy = _json.loads(strategy)
+        except (Exception):
+            strategy = None
     return CompanyOut(
         id=r["id"],
         name=r["name"],
@@ -77,6 +85,8 @@ def _row_to_company_out(row: sqlite3.Row | dict) -> CompanyOut:
         funding_stage=r.get("funding_stage"),
         last_scraped_at=r.get("last_scraped_at"),
         embedding_id=r.get("embedding_id"),
+        scrape_strategy=strategy,
+        strategy_status=r.get("strategy_status", "active"),
     )
 
 
@@ -224,6 +234,50 @@ async def discover_companies_stream(req: DiscoverRequest, db: sqlite3.Connection
         results = await discover_companies(req.names, db)
         for r in results:
             yield {"event": "result", "data": json.dumps(r, default=str)}
+
+            company_id = r.get("company_id")
+            ats_type = r.get("ats_type")
+            careers_url = r.get("careers_url")
+            if not company_id or not careers_url:
+                continue
+            if ats_type not in ("custom", "custom_api", None, ""):
+                continue
+
+            try:
+                from roleminer.registry.network_sniffer import sniff_career_page
+                from roleminer.registry.strategy_builder import generate_scrape_strategy
+
+                sniffer_data = await sniff_career_page(careers_url)
+                strategy = await generate_scrape_strategy(r.get("name", ""), sniffer_data)
+                if strategy:
+                    upsert_company(db, {
+                        "name": r.get("name", ""),
+                        "scrape_strategy": strategy,
+                        "strategy_status": "active",
+                    })
+                    yield {
+                        "event": "strategy",
+                        "data": json.dumps({
+                            "company": r.get("name"),
+                            "strategy_type": strategy.get("strategy_type"),
+                            "status": "active",
+                        }),
+                    }
+                else:
+                    yield {
+                        "event": "strategy",
+                        "data": json.dumps({
+                            "company": r.get("name"),
+                            "strategy_type": None,
+                            "status": "failed",
+                        }),
+                    }
+            except Exception as exc:
+                logger.warning(
+                    "[discover] strategy generation failed for %r: %s",
+                    r.get("name"), exc,
+                )
+
         yield {"event": "done", "data": "{}"}
 
     return EventSourceResponse(gen())
