@@ -9,14 +9,16 @@ Two strategies:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 import re
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from roleminer.scrapers.base import Job
+from roleminer.scrapers.base import Job, random_ua
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ _TIMEOUT_MS = 25_000
 _IDLE_WAIT_MS = 6_000
 _MAX_PAGINATION_CLICKS = 10
 _PAGE_STABLE_MS = 2_000
+_SCROLL_STEPS = 5
 
 _LOCATION_RE = re.compile(
     r"(?:bangalore|bengaluru|mumbai|hyderabad|chennai|gurgaon|gurugram|"
@@ -73,6 +76,43 @@ def _detect_work_mode(text: str) -> str:
     if "hybrid" in t:
         return "hybrid"
     return "onsite"
+
+
+_STEALTH_JS = """
+() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    window.chrome = { runtime: {} };
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters)
+    );
+}
+"""
+
+
+async def _apply_stealth(page) -> None:
+    await page.add_init_script(_STEALTH_JS)
+    await page.evaluate(_STEALTH_JS)
+
+
+async def _human_scroll(page) -> None:
+    try:
+        await page.evaluate("""
+            async () => {
+                const delay = ms => new Promise(r => setTimeout(r, ms));
+                for (let i = 0; i < 5; i++) {
+                    window.scrollBy(0, 200 + Math.random() * 300);
+                    await delay(300 + Math.random() * 700);
+                }
+                window.scrollTo(0, 0);
+            }
+        """)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +275,11 @@ async def _paginate_api(
                 break
             if new_jobs == 0:
                 break
+
+            import config as _cfg
+            await asyncio.sleep(
+                random.uniform(_cfg.SCRAPER_PAGINATION_DELAY_MIN, _cfg.SCRAPER_PAGINATION_DELAY_MAX)
+            )
         except Exception as exc:
             logger.warning("[custom-api] page=%d error: %s", page, exc)
             if page == 1:
@@ -400,23 +445,37 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
         logger.warning("[custom-scrape] playwright not installed — skipping")
         return []
 
+    import config as _cfg
+
     url = careers_url.strip()
     logger.info("[custom-scrape] start url=%s company=%s", url, company_name)
 
     from urllib.parse import urlparse as _urlparse
     _input_domain = ".".join(_urlparse(url).netloc.lower().split(".")[-2:])
 
+    ua = random_ua()
+
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+            ],
+        )
         try:
             ctx = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                ),
+                user_agent=ua,
                 java_script_enabled=True,
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+                timezone_id="Asia/Kolkata",
             )
             page = await ctx.new_page()
+
+            await _apply_stealth(page)
 
             _ATS_BACKEND_DOMAINS = [
                 "azurewebsites.net",
@@ -466,6 +525,8 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
             except PWTimeout:
                 logger.warning("[custom-scrape] page load timed out url=%s", url)
                 return []
+
+            await _human_scroll(page)
 
             final_url = page.url
             logger.info(
@@ -555,7 +616,8 @@ async def _paginate(page) -> int:
                 if await loc.count() > 0 and await loc.first.is_visible():
                     prev_html = await page.content()
                     await loc.first.click(timeout=5_000)
-                    await page.wait_for_timeout(_PAGE_STABLE_MS)
+                    stable_delay = _PAGE_STABLE_MS + random.randint(500, 2000)
+                    await page.wait_for_timeout(stable_delay)
                     new_html = await page.content()
                     if len(new_html) > len(prev_html) + 50:
                         clicks += 1

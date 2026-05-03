@@ -289,6 +289,82 @@ function deriveSteps(evs: RunEvent[], liveEvs: StreamEvent[], isLive: boolean): 
   ];
 }
 
+interface FunnelCounts {
+  scraped: number | null;
+  deduped: number | null;
+  filtered: number | null;
+  roleFiltered: number | null;
+  ranked: number | null;
+  scored: number | null;
+}
+
+function deriveFunnelCounts(
+  evs: RunEvent[],
+  liveEvs: StreamEvent[],
+  isLive: boolean,
+): FunnelCounts {
+  const scrapeDone = mergedEventData(evs, liveEvs, isLive, "scrape_done");
+  const dd = mergedEventData(evs, liveEvs, isLive, "dedup_done");
+  const fd = mergedEventData(evs, liveEvs, isLive, "filter_done");
+  const rd = mergedEventData(evs, liveEvs, isLive, "role_filter_done");
+  const rkd = mergedEventData(evs, liveEvs, isLive, "rank_done");
+  const sd = mergedEventData(evs, liveEvs, isLive, "score_done");
+
+  return {
+    scraped: scrapeDone?.total_jobs ?? scrapeDone?.scraped_count ?? null,
+    deduped: dd?.total_out ?? dd?.deduped_count ?? null,
+    filtered: fd?.total_out ?? fd?.filtered_count ?? null,
+    roleFiltered: rd?.total_out ?? null,
+    ranked: rkd?.total_ranked ?? rkd?.ranked_count ?? null,
+    scored: sd?.jobs_scored ?? sd?.scored_count ?? null,
+  };
+}
+
+function PipelineFunnel({ counts }: { counts: FunnelCounts }) {
+  const stages: { key: string; label: string; count: number | null; color: string }[] = [
+    { key: "scraped", label: "Scraped", count: counts.scraped, color: "bg-cyan-500" },
+    { key: "deduped", label: "Deduped", count: counts.deduped, color: "bg-amber-500" },
+    { key: "filtered", label: "Filtered", count: counts.filtered, color: "bg-purple-500" },
+    { key: "roleFiltered", label: "Role Filtered", count: counts.roleFiltered, color: "bg-purple-400" },
+    { key: "ranked", label: "Ranked", count: counts.ranked, color: "bg-indigo-500" },
+    { key: "scored", label: "Scored", count: counts.scored, color: "bg-emerald-500" },
+  ];
+
+  const maxCount = Math.max(...stages.map((s) => s.count ?? 0), 1);
+  const anyCount = stages.some((s) => s.count != null);
+
+  if (!anyCount) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 p-4">
+      <div className="text-xs text-slate-500 font-medium mb-3 uppercase tracking-wide">Job Funnel</div>
+      <div className="space-y-1.5">
+        {stages.map((stage) => {
+          const w = stage.count != null ? Math.max((stage.count / maxCount) * 100, 3) : 0;
+          return (
+            <div key={stage.key} className="flex items-center gap-3">
+              <div className="text-xs text-slate-500 w-24 text-right shrink-0">{stage.label}</div>
+              <div className="flex-1 bg-slate-100 rounded h-5 relative overflow-hidden">
+                {stage.count != null && (
+                  <div
+                    className={`h-full rounded ${stage.color} transition-all duration-500`}
+                    style={{ width: `${w}%` }}
+                  />
+                )}
+                {stage.count != null && (
+                  <span className="absolute inset-0 flex items-center justify-end pr-2 text-xs font-mono font-semibold text-slate-700">
+                    {stage.count}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function StepBadge({ step }: { step: PipelineStep }) {
   const icon = step.status === "done" ? "✓" : step.status === "running" ? "⟳" : step.status === "error" ? "✗" : "○";
   const colors = {
@@ -330,11 +406,16 @@ function ScraperTable({ evs, liveEvs, isLive }: { evs: RunEvent[]; liveEvs: Stre
 
   if (rows.length === 0) return null;
 
+  const fallbackCount = rows.filter((r) => r.done?.scraper_method === "playwright").length;
+
   return (
     <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
       <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
         <span className="font-semibold text-sm">Scrapers</span>
-        <span className="text-xs text-slate-500">{doneMap.size}/{rows.length} done</span>
+        <span className="text-xs text-slate-500">
+          {doneMap.size}/{rows.length} done
+          {fallbackCount > 0 && <span className="ml-2 text-amber-600">⚠ {fallbackCount} fallback</span>}
+        </span>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -342,33 +423,45 @@ function ScraperTable({ evs, liveEvs, isLive }: { evs: RunEvent[]; liveEvs: Stre
             <tr>
               <th className="text-left px-4 py-2">Company</th>
               <th className="text-left px-4 py-2">ATS</th>
+              <th className="text-left px-4 py-2">Method</th>
               <th className="text-right px-4 py-2">Jobs</th>
               <th className="text-right px-4 py-2">Time</th>
               <th className="text-left px-4 py-2">Status</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
-            {rows.map(({ name, done, started, skipped, error }) => (
-              <tr key={name} className={!started && !skipped ? "opacity-40" : ""}>
-                <td className="px-4 py-2 font-medium">{name}</td>
-                <td className="px-4 py-2 text-slate-500 text-xs">{done?.ats ?? skipped?.ats ?? "—"}</td>
-                <td className="px-4 py-2 text-right font-mono">{done ? done.jobs_fetched : skipped ? "—" : "—"}</td>
-                <td className="px-4 py-2 text-right text-slate-400 text-xs font-mono">{done ? `${done.duration_ms}ms` : "—"}</td>
-                <td className="px-4 py-2">
-                  {error ? (
-                    <span className="text-red-600 text-xs">{error.slice(0, 40)}</span>
-                  ) : done ? (
-                    <span className="text-emerald-600">✓</span>
-                  ) : skipped ? (
-                    <span className="text-slate-400 text-xs" title={`scraped ${skipped.last_scraped_hours_ago}h ago`}>⏭ fresh</span>
-                  ) : started ? (
-                    <span className="text-blue-500 animate-pulse text-xs">scraping…</span>
-                  ) : (
-                    <span className="text-slate-300 text-xs">pending</span>
-                  )}
-                </td>
-              </tr>
-            ))}
+            {rows.map(({ name, done, started, skipped, error }) => {
+              const method = done?.scraper_method;
+              const isFallback = method === "playwright";
+              return (
+                <tr key={name} className={!started && !skipped ? "opacity-40" : ""}>
+                  <td className="px-4 py-2 font-medium">{name}</td>
+                  <td className="px-4 py-2 text-slate-500 text-xs">{done?.ats ?? skipped?.ats ?? "—"}</td>
+                  <td className="px-4 py-2 text-xs">
+                    {method ? (
+                      <span className={isFallback ? "text-amber-600 font-medium" : "text-slate-400"}>
+                        {isFallback ? "⚠ Playwright" : "HTTP"}
+                      </span>
+                    ) : "—"}
+                  </td>
+                  <td className="px-4 py-2 text-right font-mono">{done ? done.jobs_fetched : skipped ? "—" : "—"}</td>
+                  <td className="px-4 py-2 text-right text-slate-400 text-xs font-mono">{done ? `${done.duration_ms}ms` : "—"}</td>
+                  <td className="px-4 py-2">
+                    {error ? (
+                      <span className="text-red-600 text-xs">{error.slice(0, 40)}</span>
+                    ) : done ? (
+                      <span className="text-emerald-600">✓</span>
+                    ) : skipped ? (
+                      <span className="text-slate-400 text-xs" title={`scraped ${skipped.last_scraped_hours_ago}h ago`}>⏭ fresh</span>
+                    ) : started ? (
+                      <span className="text-blue-500 animate-pulse text-xs">scraping…</span>
+                    ) : (
+                      <span className="text-slate-300 text-xs">pending</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -551,10 +644,18 @@ function RunDetailView({ runId }: { runId: number }) {
       {/* Pipeline step tracker */}
       <div className="bg-white rounded-lg border border-slate-200 p-4">
         <div className="text-xs text-slate-500 font-medium mb-3 uppercase tracking-wide">Pipeline</div>
-        <div className="flex gap-2 flex-wrap">
-          {steps.map((s) => <StepBadge key={s.key} step={s} />)}
+        <div className="flex items-center gap-1 flex-wrap">
+          {steps.map((s, i) => (
+            <div key={s.key} className="flex items-center">
+              {i > 0 && <span className="text-slate-300 mx-0.5">→</span>}
+              <StepBadge step={s} />
+            </div>
+          ))}
         </div>
       </div>
+
+      {/* Job count funnel */}
+      <PipelineFunnel counts={deriveFunnelCounts(evs, liveEvs, !!isLive)} />
 
       {/* Errors — shown immediately when any error arrives */}
       <ErrorsPanel evs={evs} liveEvs={liveEvs} />

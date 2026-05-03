@@ -1,5 +1,7 @@
 """Workday ATS scraper — unofficial JSON API per company tenant."""
+import asyncio
 import logging
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -7,7 +9,7 @@ from urllib.parse import urlparse
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from roleminer.scrapers.base import Job
+from roleminer.scrapers.base import Job, random_ua
 
 logger = logging.getLogger(__name__)
 
@@ -76,15 +78,23 @@ async def scrape(careers_url: str, session: httpx.AsyncClient, company_name: str
     if not careers_url:
         return []
 
+    import config as _cfg
+
     _PAGE = 20
     parsed = urlparse(careers_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
+    ua = random_ua()
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Origin": origin,
         "Referer": origin + "/",
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        "User-Agent": ua,
+        "Accept-Language": "en-US,en;q=0.9",
+        "DNT": "1",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
     }
 
     jobs: list[Job] = []
@@ -135,6 +145,13 @@ async def scrape(careers_url: str, session: httpx.AsyncClient, company_name: str
         offset += len(postings)
         if offset >= total or len(postings) < _PAGE:
             break
+
+        delay = random.uniform(
+            _cfg.SCRAPER_PAGINATION_DELAY_MIN,
+            _cfg.SCRAPER_PAGINATION_DELAY_MAX,
+        )
+        logger.debug("Workday[%s] pagination delay=%.1fs offset=%d", name, delay, offset)
+        await asyncio.sleep(delay)
 
     logger.info("Workday[%s] fetched %d jobs", name, len(jobs))
     return jobs

@@ -109,6 +109,10 @@ Every step emits structured events to SQLite + SSE queue:
 | `DISCOVER_MODEL` | `tencent/hy3-preview:free` | Model for career URL discovery |
 | `BRAVE_SEARCH_API_KEY` | — | Optional Brave Search for discover flow |
 | `SCRAPER_FRESHNESS_HOURS` | `24` | Skip companies scraped within this window |
+| `SCRAPER_DELAY_MIN` | `5` | Min seconds between company scrapes (anti-ban) |
+| `SCRAPER_DELAY_MAX` | `15` | Max seconds between company scrapes (anti-ban) |
+| `SCRAPER_PAGINATION_DELAY_MIN` | `2` | Min seconds between pagination requests |
+| `SCRAPER_PAGINATION_DELAY_MAX` | `6` | Max seconds between pagination requests |
 | `PROXY_URL` | — | Optional HTTP proxy for scrapers |
 
 ## Running Locally

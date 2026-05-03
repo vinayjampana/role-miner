@@ -1,8 +1,10 @@
 """RoleMiner FastAPI application."""
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 import logging
 
@@ -11,6 +13,8 @@ from roleminer.registry.db import init_db, cleanup_stale_runs
 from roleminer.api.routes import companies, jobs, preferences, runs, stats, stream, users
 
 logger = logging.getLogger(__name__)
+
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -44,3 +48,7 @@ app.include_router(preferences.router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+if _FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="frontend")

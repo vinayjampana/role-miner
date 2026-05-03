@@ -1,0 +1,28 @@
+app = "role-miner"
+primary_region = "maa"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SCRAPER_DELAY_MIN = "5"
+  SCRAPER_DELAY_MAX = "15"
+  SCRAPER_PAGINATION_DELAY_MIN = "2"
+  SCRAPER_PAGINATION_DELAY_MAX = "6"
+  SCRAPER_FRESHNESS_HOURS = "24"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "roleminer_data"
+  destination = "/data"

@@ -6,23 +6,11 @@ Personal job discovery tool for senior engineering roles in India. Scrapes Green
 
 ---
 
-## Current State (V1)
+## Pipeline
 
-**Active scrapers:** Greenhouse · Workday (HTTP-first, Playwright fallback on empty)
-
-**Company registry:** static file at `roleminer/registry/data/companies.json` — edit this file to add or remove companies. No dynamic discovery in V1.
-
-**Disabled (code kept, not called):**
-- Lever / Ashby / Cutshort / SmartRecruiters scrapers
-- Custom career portal scraping (Playwright-first path)
-- ATS auto-detection from HTML/JS
-- Career URL auto-discovery (4-step: cache → heuristics → Brave → LLM)
-- Company auto-registration from scraped job URLs
-
-**Pipeline:**
 ```
 search_profile.yaml
-  → load companies from registry/data/companies.json (Greenhouse + Workday only)
+  → load companies from registry/data/companies.json (Greenhouse + Workday)
   → skip companies scraped within SCRAPER_FRESHNESS_HOURS (default 24h)
   → HTTP scrape → Playwright fallback if zero jobs
   → fuzzy dedup (URL + normalized title/company/location)
@@ -68,8 +56,6 @@ EMBED_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free
 SCRAPER_FRESHNESS_HOURS=24
 ```
 
-`DISCOVER_MODEL` and `BRAVE_SEARCH_API_KEY` are unused in V1 but can be set for future use.
-
 ### 3. Edit your profile
 
 Edit `search_profile.yaml`:
@@ -88,7 +74,7 @@ resume_summary: |
 
 ### 4. Add companies to scrape
 
-Edit `roleminer/registry/data/companies.json`. Add any Greenhouse or Workday company:
+Edit `roleminer/registry/data/companies.json`. Only `greenhouse` and `workday` ATS types supported.
 
 ```json
 [
@@ -144,7 +130,7 @@ cd frontend && npm run dev   # proxies /api → :8000
 
 ---
 
-## Companies included (V1)
+## Companies (V1)
 
 | Company | ATS | Notes |
 |---|---|---|
@@ -158,7 +144,7 @@ cd frontend && npm run dev   # proxies /api → :8000
 | Adobe | Workday | wd5 tenant |
 | Walmart Global Tech | Workday | wd5 tenant |
 
-To add more: edit `roleminer/registry/data/companies.json`.
+To add more: edit `roleminer/registry/data/companies.json`. Only `greenhouse` and `workday` entries.
 
 ---
 
@@ -200,23 +186,6 @@ Send `X-User-Id: <id>` header to act as a specific user, or omit it to use the d
 
 ---
 
-## Future roadmap
-
-| Feature | Status |
-|---|---|
-| Lever + Ashby scrapers | Code exists, disabled — re-enable in `main.py` |
-| Cutshort scraper | Code exists, disabled |
-| SmartRecruiters scraper | Code exists, disabled |
-| Custom career portal scraping (Playwright) | Code exists (`scrapers/custom.py`), disabled as primary path |
-| ATS auto-detection from HTML | Code exists (`registry/ats_detect.py`), disabled |
-| Career URL auto-discovery (4-step) | Code exists (`registry/career_finder.py`), disabled |
-| Company auto-registration from job URLs | Code exists in pipeline, disabled |
-| Wellfound / YC / iimjobs / Naukri | Not yet built |
-| Dynamic scrape strategies (LLM-built JSON) | Code exists (`registry/strategy_builder.py`), disabled |
-| Per-company scrape concurrency | Not yet built |
-
----
-
 ## Stack
 
 - **Python 3.11+** · FastAPI · SQLite · ChromaDB · HTTPX · Playwright (fallback only)
@@ -238,18 +207,13 @@ roleminer/
 │   ├── greenhouse.py            # Greenhouse public JSON API
 │   ├── workday.py               # Workday CXS JSON API
 │   ├── base.py                  # Job dataclass · dedup_by_url · dedup_fuzzy
-│   ├── custom.py                # Playwright custom portal (disabled as primary; used as fallback)
-│   └── ...                      # lever, ashby, cutshort, smartrecruiters (disabled)
+│   └── custom.py                # Playwright fallback (used only when HTTP returns zero)
 ├── registry/
 │   ├── data/
 │   │   └── companies.json       # STATIC REGISTRY — edit this to add companies
 │   ├── static_registry.py       # load_companies() — reads companies.json
 │   ├── db.py                    # SQLite: runs, run_events, jobs, users, profiles, job_status
-│   ├── vector_store.py          # ChromaDB collections (companies + jobs)
-│   ├── ats_detect.py            # ATS URL detection (disabled in V1)
-│   ├── browser_detect.py        # Playwright ATS detection (disabled in V1)
-│   ├── career_finder.py         # 4-step career URL discovery (disabled in V1)
-│   └── ...                      # job_api_discover, network_sniffer, strategy_builder (disabled)
+│   └── vector_store.py          # ChromaDB collections (companies + jobs)
 ├── pipeline/
 │   ├── embedder.py              # OpenRouter embedding client
 │   ├── ranker.py                # semantic rank or TF-IDF fallback
@@ -285,5 +249,4 @@ frontend/src/
 
 ```bash
 pytest tests/phase1/ -v
-# 110+ tests (live HTTP probes for Greenhouse/Lever/Ashby; LLM calls mocked)
 ```

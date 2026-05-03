@@ -10,6 +10,7 @@ Usage:
 import asyncio
 import json
 import logging
+import random
 import sqlite3
 import sys
 import time
@@ -277,6 +278,11 @@ async def run_pipeline(
                     "duration_ms": int((time.time() - t0) * 1000),
                     "error": err,
                 }, source=name, queue=event_queue)
+
+                if company != companies[-1]:
+                    delay = random.uniform(config.SCRAPER_DELAY_MIN, config.SCRAPER_DELAY_MAX)
+                    logger.info("[scrape] company=%r delay=%.1fs before next", name, delay)
+                    await asyncio.sleep(delay)
 
         total_raw = len(all_jobs)
 
