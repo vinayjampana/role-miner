@@ -19,6 +19,7 @@ from roleminer.registry.db import (
     init_db,
     insert_run,
     insert_run_event,
+    sync_static_registry_to_db,
     update_run,
     update_last_scraped,
     update_company_fields,
@@ -42,6 +43,16 @@ ALLOWED_ATS_TYPES = frozenset({
 })
 
 
+def _db_row_to_scrape_spec(row: dict) -> dict:
+    """Shape expected by main._scrape_company (static JSON uses the same keys)."""
+    return {
+        "company": (row.get("name") or "").strip(),
+        "ats": (row.get("ats_type") or "").strip(),
+        "slug": (row.get("ats_slug") or "").strip(),
+        "careers_url": (row.get("careers_url") or "").strip(),
+    }
+
+
 def _parse_tech_stack(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -57,6 +68,10 @@ def _parse_tech_stack(raw: str | None) -> list[str]:
 @router.get("/companies", response_model=list[CompanyOut])
 def list_companies(db: sqlite3.Connection = Depends(get_db)):
     rows = get_all_companies(db)
+    if not rows:
+        # Stale empty DBs (e.g. older deploy) or first request before sync — re-sync from companies.json
+        sync_static_registry_to_db(db)
+        rows = get_all_companies(db)
     out = [_row_to_company_out(r) for r in rows]
     return sorted(out, key=lambda c: c.name.lower())
 
@@ -192,7 +207,9 @@ async def _scrape_company_background(
         })
 
         async with make_session() as session:
-            jobs = await _scrape_company(company, session, profile, conn=conn)
+            jobs, _method = await _scrape_company(
+                _db_row_to_scrape_spec(company), session, conn=conn
+            )
 
         if jobs:
             update_last_scraped(conn, company_id)

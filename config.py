@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent
 
 # Load .env if present (never commit .env)
 _env_file = ROOT / ".env"
@@ -12,7 +12,20 @@ if _env_file.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip())
 OUTPUT_DIR = ROOT / "output"
-DB_PATH = ROOT / "roleminer" / "registry" / "roleminer.db"
+# SQLite on HF/Docker: set ROLEMINER_DB_PATH to a writable persistent dir (e.g. /data/roleminer.db)
+_db_override = os.getenv("ROLEMINER_DB_PATH", "").strip()
+DB_PATH = (
+    Path(_db_override).expanduser().resolve()
+    if _db_override
+    else (ROOT / "roleminer" / "registry" / "roleminer.db")
+)
+# Static scrape/UI registry — optional override if JSON is mounted elsewhere
+_cj_override = os.getenv("ROLEMINER_COMPANIES_JSON", "").strip()
+COMPANIES_JSON_PATH = (
+    Path(_cj_override).expanduser().resolve()
+    if _cj_override
+    else (ROOT / "roleminer" / "registry" / "data" / "companies.json")
+)
 CHROMA_PATH = ROOT / "roleminer" / "registry" / "chroma"
 SEARCH_PROFILE = ROOT / "search_profile.yaml"
 RESUME_DIR = ROOT / "data" / "resumes"

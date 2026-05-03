@@ -1,8 +1,13 @@
 """SQLite registry for company data and run history."""
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+
+import config
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -364,14 +369,13 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
     _maybe_seed_default_user(conn)
     _backfill_runs_user_id(conn)
+    sync_static_registry_to_db(conn)
     conn.commit()
     return conn
 
 
 def _maybe_seed_default_user(conn: sqlite3.Connection) -> None:
     """Create user id=1 'default' with profile if DB has no users; optionally import search_profile.yaml."""
-    import config
-
     row = conn.execute("SELECT id FROM users WHERE id = 1").fetchone()
     if row:
         return
@@ -542,6 +546,43 @@ def upsert_company(conn: sqlite3.Connection, data: dict) -> int:
     )
     conn.commit()
     return cur.lastrowid  # type: ignore[return-value]
+
+
+def sync_static_registry_to_db(conn: sqlite3.Connection) -> int:
+    """Upsert companies from registry/data/companies.json (same list the pipeline scrapes).
+
+    The UI reads the SQLite `companies` table; the CLI pipeline reads JSON directly.
+    Keeping them in sync avoids an empty Companies page on fresh DBs (e.g. HF Spaces).
+    """
+    from roleminer.registry.static_registry import load_companies
+
+    n = 0
+    for raw in load_companies():
+        name = (raw.get("company") or "").strip()
+        if not name:
+            continue
+        upsert_company(
+            conn,
+            {
+                "name": name,
+                "ats_type": (raw.get("ats") or "").strip() or None,
+                "ats_slug": (raw.get("slug") or "").strip() or None,
+                "careers_url": (raw.get("careers_url") or "").strip() or None,
+            },
+        )
+        n += 1
+    if n == 0:
+        p = config.COMPANIES_JSON_PATH
+        if not p.exists():
+            logger.warning("sync_static_registry_to_db: 0 companies; file missing: %s", p)
+        else:
+            logger.warning(
+                "sync_static_registry_to_db: 0 companies from %s (empty or invalid entries)",
+                p,
+            )
+    else:
+        logger.info("sync_static_registry_to_db: upserted %d companies from static registry", n)
+    return n
 
 
 def list_users(conn: sqlite3.Connection) -> list[dict]:
