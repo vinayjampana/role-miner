@@ -333,16 +333,55 @@ SEED_COMPANIES: list[dict] = [
 # ---------------------------------------------------------------------------
 
 
+def _unlink_sqlite_paths(db_path: Path) -> None:
+    """Remove main DB and WAL/SHM sidecars (best-effort)."""
+    for suffix in ("", "-wal", "-shm"):
+        p = db_path if not suffix else db_path.with_name(db_path.name + suffix)
+        try:
+            if p.is_file():
+                p.unlink()
+        except OSError as exc:
+            logger.warning("init_db: could not remove %s: %s", p, exc)
+
+
 def init_db(db_path: Path) -> sqlite3.Connection:
     """Initialise SQLite database and return connection."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    last_exc: sqlite3.DatabaseError | None = None
+    for attempt in range(2):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            _init_db_schema_and_seed(conn)
+            conn.commit()
+            return conn
+        except sqlite3.DatabaseError as exc:
+            last_exc = exc
+            if conn:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+            if attempt == 0:
+                logger.warning(
+                    "init_db: SQLite unreadable at %s (%s); deleting DB files and retrying once",
+                    db_path,
+                    exc,
+                )
+                _unlink_sqlite_paths(db_path)
+            else:
+                raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("init_db: unreachable")
+
+
+def _init_db_schema_and_seed(conn: sqlite3.Connection) -> None:
     conn.execute(_DDL_COMPANIES)
     conn.execute(_DDL_RUNS)
     conn.execute(_DDL_RUN_EVENTS)
-    # Lightweight migrations for existing DBs missing new columns.
     cur = conn.execute("PRAGMA table_info(runs)")
     existing_cols = {row["name"] for row in cur.fetchall()}
     if "status" not in existing_cols:
@@ -375,8 +414,6 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     _maybe_seed_default_user(conn)
     _backfill_runs_user_id(conn)
     sync_static_registry_to_db(conn)
-    conn.commit()
-    return conn
 
 
 def _maybe_seed_default_user(conn: sqlite3.Connection) -> None:
