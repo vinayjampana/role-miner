@@ -1,3 +1,13 @@
+---
+title: RoleMiner
+emoji: 💼
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # RoleMiner
 
 Personal job discovery tool for senior engineering roles in India. Scrapes Greenhouse and Workday, scores against your profile, surfaces a ranked shortlist via CLI or React dashboard.
