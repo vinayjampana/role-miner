@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re as _re
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -70,6 +71,38 @@ def dedup_by_url(jobs: list[Job]) -> list[Job]:
         if job.url not in seen:
             seen.add(job.url)
             result.append(job)
+    return result
+
+
+def _normalize_title(title: str) -> str:
+    t = (title or "").lower()
+    t = _re.sub(r"[^\w\s]", " ", t)
+    t = _re.sub(r"\biii\b", "3", t)
+    t = _re.sub(r"\bii\b", "2", t)
+    t = _re.sub(r"\biv\b", "4", t)
+    t = _re.sub(r"\bsr\.?\b", "senior", t)
+    t = _re.sub(r"\bjr\.?\b", "junior", t)
+    return _re.sub(r"\s+", " ", t).strip()
+
+
+def dedup_fuzzy(jobs: list[Job]) -> list[Job]:
+    """Dedup by URL first, then by normalized title+company+location fingerprint."""
+    seen_urls: set[str] = set()
+    seen_fps: set[str] = set()
+    result: list[Job] = []
+    for job in jobs:
+        if job.url in seen_urls:
+            continue
+        seen_urls.add(job.url)
+        fp = (
+            _normalize_title(job.title)
+            + "|" + (job.company or "").lower().strip()
+            + "|" + (job.location or "").lower().strip()
+        )
+        if fp in seen_fps:
+            continue
+        seen_fps.add(fp)
+        result.append(job)
     return result
 
 

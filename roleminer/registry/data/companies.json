@@ -1,0 +1,52 @@
+[
+  {
+    "company": "Razorpay",
+    "ats": "greenhouse",
+    "slug": "razorpaysoftwareprivatelimited",
+    "careers_url": "https://boards.greenhouse.io/razorpaysoftwareprivatelimited"
+  },
+  {
+    "company": "Groww",
+    "ats": "greenhouse",
+    "slug": "groww",
+    "careers_url": "https://boards.greenhouse.io/groww"
+  },
+  {
+    "company": "Postman",
+    "ats": "greenhouse",
+    "slug": "postman",
+    "careers_url": "https://boards.greenhouse.io/postman"
+  },
+  {
+    "company": "Slice",
+    "ats": "greenhouse",
+    "slug": "slice",
+    "careers_url": "https://boards.greenhouse.io/slice"
+  },
+  {
+    "company": "PhonePe",
+    "ats": "greenhouse",
+    "slug": "phonepe",
+    "careers_url": "https://boards.greenhouse.io/phonepe"
+  },
+  {
+    "company": "BrowserStack",
+    "ats": "workday",
+    "careers_url": "https://browserstack.wd3.myworkdayjobs.com/wday/cxs/browserstack/External/jobs"
+  },
+  {
+    "company": "PayPal",
+    "ats": "workday",
+    "careers_url": "https://paypal.wd1.myworkdayjobs.com/wday/cxs/paypal/jobs/jobs"
+  },
+  {
+    "company": "Adobe",
+    "ats": "workday",
+    "careers_url": "https://adobe.wd5.myworkdayjobs.com/wday/cxs/adobe/external_experienced/jobs"
+  },
+  {
+    "company": "Walmart Global Tech",
+    "ats": "workday",
+    "careers_url": "https://walmart.wd5.myworkdayjobs.com/wday/cxs/walmart/WalmartExternal/jobs"
+  }
+]

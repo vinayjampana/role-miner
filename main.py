@@ -23,18 +23,13 @@ from typing import Optional
 import config
 import re as _re
 
-from roleminer.registry.ats_detect import detect_ats_from_url, find_embedded_ats_url, workday_human_to_cxs
-from roleminer.registry.job_api_discover import discover_job_api_with_alternate_host
+# V1: ats_detect, job_api_discover kept for reference but not called in pipeline
 from roleminer.registry.db import (
     init_db,
-    insert_company,
-    get_all_companies,
     insert_run,
     insert_run_event,
     update_run,
-    update_last_scraped,
     clear_scrape_freshness,
-    update_company_fields,
     update_company_embedding_id,
     upsert_job,
     replace_job_runs_for_run,
@@ -42,14 +37,14 @@ from roleminer.registry.db import (
     ensure_default_user_id,
     get_active_profile_for_user,
     search_profile_row_to_pipeline_dict,
-    SEED_COMPANIES,
+    get_freshness_by_name,
+    set_freshness_by_name,
 )
+from roleminer.registry.static_registry import load_companies
 from roleminer.registry import vector_store
 from roleminer.pipeline import embedder
-from roleminer.scrapers.base import Job, dedup_by_url, make_session
-from roleminer.scrapers import greenhouse, lever, ashby, cutshort, workday, smartrecruiters
-from roleminer.scrapers import custom as custom_scraper
-from roleminer.scrapers import dynamic as dynamic_scraper
+from roleminer.scrapers.base import Job, dedup_by_url, dedup_fuzzy, make_session
+from roleminer.scrapers import greenhouse, workday
 from roleminer.pipeline.classifier import classify_company
 from roleminer.pipeline.filter import (
     filter_jobs, detect_work_mode, days_since,
@@ -67,97 +62,8 @@ logging.basicConfig(
 logger = logging.getLogger("roleminer.main")
 
 
-_JS_SRC_RE = _re.compile(r'src=["\']([^"\']+\.js)["\']', _re.IGNORECASE)
-_JS_CHUNK_LIMIT = 12
-
-
-async def _scan_js_chunks_for_ats(
-    session, html: str, base_url: str
-) -> tuple[str, tuple[str, str]] | None:
-    srcs = _JS_SRC_RE.findall(html)[:_JS_CHUNK_LIMIT]
-    if not srcs:
-        return None
-    from urllib.parse import urljoin
-    for src in srcs:
-        chunk_url = urljoin(base_url, src)
-        try:
-            cr = await session.get(chunk_url, follow_redirects=True, timeout=15.0)
-            if cr.status_code >= 400:
-                continue
-            embedded = find_embedded_ats_url(cr.text)
-            if embedded:
-                det = detect_ats_from_url(embedded)
-                if det:
-                    return embedded, det
-        except Exception:
-            continue
-    return None
-
-
-async def _resolve_careers_to_ats_url(session, careers_url: str) -> tuple[str, tuple[str, str] | None]:
-    """
-    Resolve a careers page URL to a scrappable ATS URL.
-
-    Pass 1 (fast): static HTTP fetch → check final URL + scan HTML.
-    Pass 2 (fallback): headless Chromium render → network requests + rendered DOM + hrefs.
-
-    Returns (canonical_ats_url_or_final_url, detect_ats_from_url_result_or_None).
-    """
-    u = (careers_url or "").strip()
-    if not u:
-        logger.info("[careers-resolve] empty input — skip")
-        return u, None
-    logger.info("[careers-resolve] step=fetch url=%s", u)
-    try:
-        r = await session.get(u, follow_redirects=True, timeout=25.0)
-        final = str(r.url)
-        logger.info(
-            "[careers-resolve] step=http status=%s final_url=%s (redirected=%s)",
-            r.status_code,
-            final,
-            "yes" if final.rstrip("/") != u.rstrip("/") else "no",
-        )
-        if r.status_code >= 400:
-            det = detect_ats_from_url(u)
-            logger.info("[careers-resolve] step=detect(bad_status) on original url → %s", det)
-            return u, det
-        det = detect_ats_from_url(final)
-        logger.info("[careers-resolve] step=detect(final_url) → %s", det)
-        if det:
-            canonical = workday_human_to_cxs(final) or final if det[0] == "workday" else final
-            return canonical, det
-        html_len = len(r.text or "")
-        logger.info("[careers-resolve] step=html_scan body_bytes=%s (no ATS in location bar)", html_len)
-        embedded = find_embedded_ats_url(r.text)
-        if embedded:
-            det2 = detect_ats_from_url(embedded)
-            canonical2 = workday_human_to_cxs(embedded) or embedded if det2 and det2[0] == "workday" else embedded
-            logger.info("[careers-resolve] step=embedded found=%s detect → %s", canonical2, det2)
-            return canonical2, det2
-
-        js_det = await _scan_js_chunks_for_ats(session, r.text, final)
-        if js_det:
-            logger.info("[careers-resolve] step=js_chunk_scan found=%s", js_det)
-            return js_det[0], js_det[1]
-
-        api_url = await discover_job_api_with_alternate_host(session, r.text, final)
-        if api_url:
-            logger.info("[careers-resolve] step=job_api found=%s", api_url)
-            return api_url, ("custom_api", "")
-
-        logger.info("[careers-resolve] step=embedded none — trying browser render")
-    except Exception as exc:
-        logger.warning("[careers-resolve] step=error %s — trying browser render", exc)
-
-    # Pass 2: JS-rendered page — headless browser fallback
-    try:
-        from roleminer.registry.browser_detect import detect_ats_with_browser
-        browser_url, browser_det = await detect_ats_with_browser(u)
-        logger.info("[careers-resolve] step=browser_detect → %s url=%s", browser_det, browser_url)
-        return browser_url, browser_det
-    except Exception as exc:
-        logger.warning("[careers-resolve] step=browser_detect error: %s", exc)
-        return u, None
+# V1: _scan_js_chunks_for_ats and _resolve_careers_to_ats_url disabled (ATS detection not used)
+# kept in git history; re-enable when supporting custom/unknown ATS
 
 
 # ---------------------------------------------------------------------------
@@ -165,42 +71,23 @@ async def _resolve_careers_to_ats_url(session, careers_url: str) -> tuple[str, t
 # ---------------------------------------------------------------------------
 
 async def bootstrap() -> None:
-    """Seed company registry with known Indian product companies."""
-    logger.info("Bootstrapping company registry …")
-    conn = init_db(config.DB_PATH)
+    """Embed static company registry into ChromaDB for semantic search."""
+    logger.info("Bootstrapping — loading static registry and embedding companies …")
+    companies = load_companies()
+    logger.info("Static registry: %d companies", len(companies))
 
-    existing_rows = get_all_companies(conn)
-    existing = {c["name"].lower() for c in existing_rows}
-    inserted = 0
-    new_companies: list[dict] = []
-
-    for company in SEED_COMPANIES:
-        if company["name"].lower() in existing:
-            logger.info("  skip (exists): %s", company["name"])
-            continue
-        row_id = insert_company(conn, company)
-        company = {**company, "id": row_id}
-        new_companies.append(company)
-        logger.info("  inserted [%d]: %s (%s / %s)", row_id, company["name"], company.get("ats_type"), company.get("ats_slug"))
-        inserted += 1
-
-    # Embed all companies that lack embedding_id
     if embedder.is_available():
-        to_embed = [c for c in get_all_companies(conn) if not c.get("embedding_id")]
-        if to_embed:
-            logger.info("Embedding %d companies via %s …", len(to_embed), config.EMBED_MODEL)
-            texts = [vector_store._company_text(c) for c in to_embed]
-            vecs = embedder.embed_batched(texts, input_type="passage")
-            chroma = vector_store.get_client(config.CHROMA_PATH)
-            vector_store.upsert_companies(chroma, to_embed, vecs)
-            for c in to_embed:
-                update_company_embedding_id(conn, c["id"], str(c["id"]))
-            logger.info("Embedded %d companies → ChromaDB", len(to_embed))
+        # Map static registry shape to vector_store expected shape
+        co_docs = [{"name": c["company"], "ats_type": c["ats"], "careers_url": c.get("careers_url", "")} for c in companies]
+        texts = [vector_store._company_text(c) for c in co_docs]
+        vecs = embedder.embed_batched(texts, input_type="passage")
+        chroma = vector_store.get_client(config.CHROMA_PATH)
+        vector_store.upsert_companies(chroma, co_docs, vecs)
+        logger.info("Embedded %d companies → ChromaDB", len(companies))
     else:
         logger.info("EMBED_API_KEY not set — skipping company embeddings")
 
-    conn.close()
-    logger.info("Bootstrap complete. Inserted %d companies (%d already existed).", inserted, len(existing))
+    logger.info("Bootstrap complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -210,247 +97,57 @@ async def bootstrap() -> None:
 async def _scrape_company(
     company: dict,
     session,
-    profile: dict,
     conn: sqlite3.Connection | None = None,
-) -> list[Job]:
-    """Scrape one company, returning jobs. Errors are caught and logged."""
-    ats_type = (company.get("ats_type") or "").strip()
-    slug = (company.get("ats_slug") or "").strip()
-    name = company.get("name", "")
+) -> tuple[list[Job], str]:
+    """
+    Scrape one company. Routes to Greenhouse or Workday HTTP scraper.
+    Falls back to Playwright if HTTP returns zero jobs.
+    Returns (jobs, method) where method is "http" or "playwright".
+    """
+    ats = company.get("ats", "").strip()
+    name = company.get("company", "")
     careers_url = (company.get("careers_url") or "").strip()
-    cid = company.get("id")
+    slug = (company.get("slug") or "").strip()
 
-    logger.info(
-        "[scrape] company=%r id=%s initial ats_type=%r ats_slug=%r careers_url=%s",
-        name,
-        cid,
-        ats_type,
-        slug,
-        careers_url or "(none)",
-    )
+    logger.info("[scrape] company=%r ats=%r", name, ats)
 
-    # Check for active scrape_strategy from discovery agent
-    if conn and cid:
-        strategy = company.get("scrape_strategy")
-        strategy_status = company.get("strategy_status", "active")
-        if isinstance(strategy, str) and strategy:
-            try:
-                import json as _json
-                strategy = _json.loads(strategy)
-            except (Exception):
-                strategy = None
-        if strategy and strategy_status == "active":
-            logger.info(
-                "[scrape] company=%r step=dynamic_strategy type=%s",
-                name, strategy.get("strategy_type"),
-            )
-            try:
-                snapshots, http_ok = await dynamic_scraper.scrape_dynamic(
-                    company_url=careers_url or company.get("domain", ""),
-                    strategy=strategy,
-                    session=session,
-                    company_name=name,
-                )
-                jobs = []
-                for snap in snapshots:
-                    jobs.append(Job(**snap))
-            except Exception as exc:
-                logger.warning("[scrape] company=%r step=dynamic_strategy error: %s", name, exc)
-                jobs = []
-                http_ok = False
+    jobs: list[Job] = []
+    http_ok = False
 
-            if jobs:
-                logger.info("[scrape] company=%r step=dynamic_strategy jobs=%d", name, len(jobs))
-                return jobs
-
-            # Self-healing: strategy returned 0 jobs but HTTP was OK → mark stale
-            if http_ok:
-                logger.warning(
-                    "[scrape] company=%r step=dynamic_stale 0 jobs but HTTP OK — marking strategy stale",
-                    name,
-                )
-                update_company_fields(conn, cid, {"strategy_status": "stale"})
-            else:
-                logger.warning(
-                    "[scrape] company=%r step=dynamic_failed HTTP error — falling back",
-                    name,
-                )
-
-    det: tuple[str, str] | None = None
-
-    if ats_type in ("", "custom") and not careers_url:
-        logger.info(
-            "[scrape] company=%r step=auto_discover (custom ats, no careers_url)",
-            name,
-        )
+    if ats == "greenhouse":
         try:
-            from roleminer.registry.career_finder import _heuristic_search
-            discovered = await _heuristic_search(name, session)
-            if discovered:
-                careers_url = discovered
-                logger.info("[scrape] company=%r step=auto_discover found=%s", name, careers_url)
-                if conn and cid:
-                    update_company_fields(conn, cid, {"careers_url": careers_url})
-                    company["careers_url"] = careers_url
-            else:
-                logger.info("[scrape] company=%r step=auto_discover miss", name)
-        except Exception as exc:
-            logger.warning("[scrape] company=%r step=auto_discover error: %s", name, exc)
-
-    needs_resolve = bool(
-        careers_url
-        and (
-            ats_type in ("", "custom")
-            or (ats_type in ("greenhouse", "lever", "ashby", "smartrecruiters") and not slug)
-        )
-    )
-    if needs_resolve:
-        logger.info(
-            "[scrape] company=%r step=careers_resolve reason=%s",
-            name,
-            "custom_or_empty_ats" if ats_type in ("", "custom") else "missing_slug_for_known_ats",
-        )
-        resolved, det = await _resolve_careers_to_ats_url(session, careers_url)
-        if det:
-            ats_type, slug = det[0], (det[1] or "").strip()
-            careers_url = resolved
-        elif resolved != careers_url:
-            careers_url = resolved
-        logger.info(
-            "[scrape] company=%r step=after_resolve ats_type=%r ats_slug=%r careers_url=%s det=%s",
-            name,
-            ats_type,
-            slug,
-            careers_url or "(none)",
-            det,
-        )
-    else:
-        logger.info(
-            "[scrape] company=%r step=careers_resolve skipped (have slug or no careers_url for resolve)",
-            name,
-        )
-
-    if conn and cid and det:
-        patch: dict = {}
-        if ats_type and ats_type != company.get("ats_type"):
-            patch["ats_type"] = ats_type
-        if slug and slug != (company.get("ats_slug") or ""):
-            patch["ats_slug"] = slug
-        new_cu = (careers_url or "").strip()
-        if new_cu and new_cu != (company.get("careers_url") or "").strip():
-            patch["careers_url"] = new_cu
-        if patch:
-            logger.info("[scrape] company=%r step=db_patch %s", name, patch)
-            update_company_fields(conn, cid, patch)
-            company.update(patch)
-        else:
-            logger.info("[scrape] company=%r step=db_patch none (already in sync)", name)
-    elif conn and cid and not det:
-        logger.info("[scrape] company=%r step=db_patch skipped (no new ATS from resolve)", name)
-
-    if not slug and ats_type not in ("workday", "cutshort", "custom_api"):
-        if careers_url:
-            logger.info(
-                "[scrape] company=%r step=custom_playwright ats_type=%r careers_url=%s",
-                name, ats_type, careers_url,
-            )
-            try:
-                jobs = await custom_scraper.scrape(careers_url, company_name=name)
-                if jobs:
-                    logger.info("[scrape] company=%r step=custom_playwright jobs=%d", name, len(jobs))
-                    # Validate: LLM confirms scraped items are real job postings, not nav/page noise.
-                    # Cheap call using DISCOVER_MODEL (free tier). Only fires for custom path.
-                    from roleminer.pipeline.scorer import validate_custom_scrape
-                    valid, reason = await validate_custom_scrape(jobs, name)
-                    if valid:
-                        return jobs
-                    logger.warning(
-                        "[scrape] company=%r step=custom_playwright validation_failed reason=%r — treating as zero",
-                        name, reason,
-                    )
-                    jobs = []
-                else:
-                    logger.info("[scrape] company=%r step=custom_playwright zero jobs", name)
-            except Exception as exc:
-                logger.warning("[scrape] company=%r step=custom_playwright error: %s", name, exc)
-
-        # Zero-job fallback: browser CTA detection → find the real job portal URL.
-        # Handles cases like whatfix.com/careers → whatfix101.hire.trakstar.com
-        # where the careers page is a landing page that links/redirects to an external ATS.
-        if careers_url:
-            try:
-                from roleminer.registry.browser_detect import find_redirect_via_cta
-                redirect = await find_redirect_via_cta(careers_url)
-                if redirect and redirect.rstrip("/") != careers_url.rstrip("/"):
-                    logger.info("[scrape] company=%r step=zero_job_redirect found=%s", name, redirect)
-                    new_det = detect_ats_from_url(redirect)
-                    if conn and cid:
-                        patch: dict = {"careers_url": redirect}
-                        if new_det:
-                            patch["ats_type"] = new_det[0]
-                            if new_det[1]:
-                                patch["ats_slug"] = new_det[1]
-                        update_company_fields(conn, cid, patch)
-                        company.update(patch)
-                    if new_det:
-                        new_ats, new_sl = new_det[0], (new_det[1] or "").strip()
-                        if new_ats == "greenhouse":
-                            jobs = await greenhouse.scrape(new_sl, session, company_name=name)
-                        elif new_ats == "lever":
-                            jobs = await lever.scrape(new_sl, session, company_name=name)
-                        elif new_ats == "ashby":
-                            jobs = await ashby.scrape(new_sl, session, company_name=name)
-                        elif new_ats == "smartrecruiters":
-                            jobs = await smartrecruiters.scrape(new_sl, session, company_name=name)
-                        elif new_ats == "workday":
-                            jobs = await workday.scrape(redirect, session, company_name=name)
-                        else:
-                            jobs = await custom_scraper.scrape(redirect, company_name=name)
-                    else:
-                        jobs = await custom_scraper.scrape(redirect, company_name=name)
-                    if jobs:
-                        logger.info("[scrape] company=%r step=zero_job_redirect jobs=%d", name, len(jobs))
-                        return jobs
-                    logger.info("[scrape] company=%r step=zero_job_redirect still_zero", name)
-            except Exception as exc:
-                logger.warning("[scrape] company=%r step=zero_job_redirect error: %s", name, exc)
-
-        logger.warning(
-            "[scrape] company=%r step=abort reason=no_ats_slug ats_type=%r careers_url=%s",
-            name,
-            ats_type,
-            careers_url or "(none)",
-        )
-        return []
-
-    try:
-        logger.info("[scrape] company=%r step=call_scraper ats=%r slug=%r workday_url=%s", name, ats_type, slug, careers_url if ats_type == "workday" else "—")
-        if ats_type == "greenhouse":
             jobs = await greenhouse.scrape(slug, session, company_name=name)
-        elif ats_type == "lever":
-            jobs = await lever.scrape(slug, session, company_name=name)
-        elif ats_type == "ashby":
-            jobs = await ashby.scrape(slug, session, company_name=name)
-        elif ats_type == "smartrecruiters":
-            jobs = await smartrecruiters.scrape(slug, session, company_name=name)
-        elif ats_type == "workday":
+            http_ok = True
+        except Exception as exc:
+            logger.warning("[scrape] greenhouse[%s] http failed: %s", name, exc)
+    elif ats == "workday":
+        try:
             jobs = await workday.scrape(careers_url, session, company_name=name)
-        elif ats_type == "cutshort":
-            skills = profile.get("skills", [])
-            locations = profile.get("locations", [])
-            jobs = await cutshort.scrape(skills, locations, session)
-        elif ats_type == "custom" and careers_url:
+            http_ok = True
+        except Exception as exc:
+            logger.warning("[scrape] workday[%s] http failed: %s", name, exc)
+    else:
+        logger.warning("[scrape] unsupported ats=%r company=%r — skip", ats, name)
+        return [], "none"
+
+    if jobs:
+        logger.info("[scrape] company=%r method=http jobs=%d", name, len(jobs))
+        return jobs, "http"
+
+    # HTTP returned nothing or failed — Playwright fallback
+    logger.info("[scrape] company=%r http=0 → playwright fallback url=%s", name, careers_url)
+    if careers_url:
+        try:
+            from roleminer.scrapers import custom as custom_scraper
             jobs = await custom_scraper.scrape(careers_url, company_name=name)
-        elif ats_type == "custom_api" and careers_url:
-            jobs = await custom_scraper.scrape_json_api(careers_url, session, company_name=name)
-        else:
-            logger.warning("[scrape] company=%r step=abort unknown ats_type=%r", name, ats_type)
-            return []
-        logger.info("[scrape] company=%r step=done jobs_fetched=%s", name, len(jobs))
-        return jobs
-    except Exception as exc:
-        logger.error("[scrape] company=%r step=error ats=%r slug=%r: %s", name, ats_type, slug, exc)
-        return []
+            if jobs:
+                logger.info("[scrape] company=%r method=playwright jobs=%d", name, len(jobs))
+                return jobs, "playwright"
+            logger.info("[scrape] company=%r playwright=0", name)
+        except Exception as exc:
+            logger.warning("[scrape] company=%r playwright fallback failed: %s", name, exc)
+
+    return [], "playwright" if not http_ok else "http"
 
 
 async def _emit(
@@ -511,9 +208,9 @@ async def run_pipeline(
     if user_id is not None:
         logger.info("run_pipeline run_id=%s user_id=%s", run_id, user_id)
     resume_summary = profile.get("resume_summary", "")
-    companies = get_all_companies(conn)
+    companies = load_companies()
     logger.info(
-        "[pipeline] run_id=%s scrape phase: companies_in_registry=%d (Cutshort + each row)",
+        "[pipeline] run_id=%s scrape phase: companies_in_registry=%d",
         run_id,
         len(companies),
     )
@@ -522,44 +219,17 @@ async def run_pipeline(
 
     try:
         async with make_session(proxy_url=config.PROXY_URL) as session:
-            total_companies = len(companies) + 1  # +1 for Cutshort
             await _emit(conn, run_id, "scrape_start", {
-                "total_sources": total_companies,
+                "total_sources": len(companies),
                 "freshness_hours": config.SCRAPER_FRESHNESS_HOURS,
-                "companies": ["Cutshort"] + [c.get("name", "") for c in companies],
+                "companies": [c.get("company", "") for c in companies],
             }, queue=event_queue)
 
-            # Cutshort (profile-level)
-            t0 = time.time()
-            await _emit(conn, run_id, "scraper_start", {
-                "company": "Cutshort", "ats": "cutshort",
-            }, source="Cutshort", queue=event_queue)
-            try:
-                cs_jobs = await cutshort.scrape(
-                    skills=profile.get("skills", []),
-                    locations=profile.get("locations", []),
-                    session=session,
-                )
-            except Exception as exc:
-                logger.error("Cutshort failed: %s", exc)
-                cs_jobs = []
-                await _emit(conn, run_id, "error", {
-                    "step": "scraper", "company": "Cutshort",
-                    "error": str(exc), "traceback": traceback.format_exc(),
-                }, source="Cutshort", queue=event_queue)
-            all_jobs.extend(cs_jobs)
-            await _emit(conn, run_id, "scraper_done", {
-                "company": "Cutshort", "ats": "cutshort",
-                "jobs_fetched": len(cs_jobs),
-                "duration_ms": int((time.time() - t0) * 1000),
-                "error": None,
-            }, source="Cutshort", queue=event_queue)
-
             freshness_hours = config.SCRAPER_FRESHNESS_HOURS
-            skipped_fresh: list[str] = []
 
             for company in companies:
-                last = company.get("last_scraped_at")
+                name = company.get("company", "")
+                last = get_freshness_by_name(conn, name)
                 if last:
                     try:
                         last_dt = datetime.fromisoformat(last)
@@ -567,52 +237,52 @@ async def run_pipeline(
                             last_dt = last_dt.replace(tzinfo=timezone.utc)
                         hours_ago = (datetime.now(tz=timezone.utc) - last_dt).total_seconds() / 3600
                         if hours_ago < freshness_hours:
-                            skipped_fresh.append(company.get("name", ""))
                             logger.info(
-                                "[scrape] company=%r step=skipped_fresh last_scraped_hours_ago=%.1f freshness_hours=%s",
-                                company.get("name"),
-                                hours_ago,
-                                freshness_hours,
+                                "[scrape] company=%r step=skipped_fresh hours_ago=%.1f",
+                                name, hours_ago,
                             )
                             await _emit(conn, run_id, "scraper_skipped", {
-                                "company": company.get("name"),
-                                "ats": company.get("ats_type"),
+                                "company": name,
+                                "ats": company.get("ats"),
                                 "last_scraped_hours_ago": round(hours_ago, 1),
                                 "freshness_hours": freshness_hours,
-                            }, source=company.get("name", ""), queue=event_queue)
+                            }, source=name, queue=event_queue)
                             continue
                     except (ValueError, TypeError):
-                        pass  # malformed ts → scrape anyway
+                        pass
 
                 t0 = time.time()
                 await _emit(conn, run_id, "scraper_start", {
-                    "company": company.get("name"), "ats": company.get("ats_type"),
-                }, source=company.get("name", ""), queue=event_queue)
+                    "company": name, "ats": company.get("ats"),
+                }, source=name, queue=event_queue)
                 err = None
+                scraper_method = "http"
                 try:
-                    jobs = await _scrape_company(company, session, profile, conn)
+                    jobs, scraper_method = await _scrape_company(company, session, conn)
                 except Exception as exc:
                     jobs = []
                     err = str(exc)
                     await _emit(conn, run_id, "error", {
-                        "step": "scraper", "company": company.get("name"),
+                        "step": "scraper", "company": name,
                         "error": err, "traceback": traceback.format_exc(),
-                    }, source=company.get("name", ""), queue=event_queue)
+                    }, source=name, queue=event_queue)
                 all_jobs.extend(jobs)
-                if jobs and company.get("id"):
-                    update_last_scraped(conn, company["id"])
+                if jobs:
+                    set_freshness_by_name(conn, name)
                 await _emit(conn, run_id, "scraper_done", {
-                    "company": company.get("name"),
-                    "ats": company.get("ats_type"),
+                    "company": name,
+                    "ats": company.get("ats"),
+                    "scraper_method": scraper_method,
                     "jobs_fetched": len(jobs),
                     "duration_ms": int((time.time() - t0) * 1000),
                     "error": err,
-                }, source=company.get("name", ""), queue=event_queue)
+                }, source=name, queue=event_queue)
 
         total_raw = len(all_jobs)
 
         await _emit(conn, run_id, "scrape_done", {
             "total_jobs": total_raw,
+            "scraped_count": total_raw,
         }, queue=event_queue)
 
         await _pipeline_post_scrape(conn, run_id, all_jobs, profile, started, event_queue)
@@ -642,69 +312,24 @@ async def _pipeline_post_scrape(
     resume_summary = profile.get("resume_summary", "")
     total_raw = len(all_jobs)
 
-    existing_names = {c["name"].lower() for c in get_all_companies(conn)}
-    discovered: list[dict] = []
-    seen_new: set[str] = set()
-    pd_skip_existing = pd_skip_dup = pd_skip_not_ats = pd_skip_no_name = 0
-    for job in all_jobs:
-        name_lower = (job.company or "").lower().strip()
-        if not name_lower:
-            pd_skip_no_name += 1
-            continue
-        if name_lower in existing_names:
-            pd_skip_existing += 1
-            continue
-        if name_lower in seen_new:
-            pd_skip_dup += 1
-            continue
-        result = detect_ats_from_url(job.url or "")
-        if not result:
-            pd_skip_not_ats += 1
-            continue
-        ats_type, slug = result
-        new_co: dict = {
-            "name": job.company,
-            "ats_type": ats_type,
-            "ats_slug": slug,
-            "company_type": job.company_type or "product",
-        }
-        if ats_type == "workday" and "/wday/cxs/" in (job.url or ""):
-            new_co["careers_url"] = job.url.split("?")[0]
-        row_id = insert_company(conn, new_co)
-        new_co["id"] = row_id
-        discovered.append(new_co)
-        seen_new.add(name_lower)
-        logger.info(
-            "[pipeline-discover] insert company=%r ats=%s/%s job_url=%s db_id=%s careers_url=%s",
-            job.company, ats_type, slug, job.url, row_id,
-            new_co.get("careers_url") or "(none)",
-        )
-    logger.info(
-        "[pipeline-discover] summary jobs_scanned=%d new_companies=%d skip_no_name=%d skip_in_registry=%d skip_dup_run=%d skip_url_not_ats=%d",
-        len(all_jobs), len(discovered), pd_skip_no_name, pd_skip_existing, pd_skip_dup, pd_skip_not_ats,
-    )
-    await _emit(conn, run_id, "discover_done", {
-        "new_companies": len(discovered),
-        "names": [c["name"] for c in discovered],
-    }, queue=event_queue)
+    # V1: company auto-discovery disabled (static registry only)
 
     n_pre_dedup = len(all_jobs)
-    all_jobs = dedup_by_url(all_jobs)
+    all_jobs = dedup_fuzzy(all_jobs)  # URL + fuzzy title+company+location
     dedup_jobs_snap = _run_log_job_items(all_jobs)
     await _emit(conn, run_id, "dedup_done", {
         "total_in": n_pre_dedup,
         "total_out": len(all_jobs),
         "removed": n_pre_dedup - len(all_jobs),
+        "deduped_count": len(all_jobs),
         "jobs": dedup_jobs_snap,
     }, queue=event_queue)
     logger.info(
-        "[pipeline] run_id=%s dedup_done in=%d out=%d removed=%d event_items=%d truncated=%s",
+        "[pipeline] run_id=%s dedup_done in=%d out=%d removed=%d",
         run_id,
         n_pre_dedup,
         len(all_jobs),
         n_pre_dedup - len(all_jobs),
-        len(dedup_jobs_snap["items"]),
-        dedup_jobs_snap["truncated"],
     )
 
     for job in all_jobs:
@@ -783,6 +408,7 @@ async def _pipeline_post_scrape(
     filter_passed_snap = _run_log_job_items(passed)
     await _emit(conn, run_id, "filter_done", {
         "total_in": filter_in, "total_out": len(passed),
+        "filtered_count": len(passed),
         "dropped_stale": dropped["stale"],
         "dropped_location": dropped["location"],
         "dropped_salary": dropped["salary"],
@@ -840,24 +466,24 @@ async def _pipeline_post_scrape(
     ranked, rank_scores = rank_jobs(passed, profile, resume_summary)
     replace_job_runs_for_run(conn, run_id, [asdict(j) for j in ranked], rank_scores)
     ranked_snap = _run_log_ranked_jobs(ranked, rank_scores)
+    _SCORE_TOP_N = 20
     await _emit(conn, run_id, "rank_done", {
         "total_ranked": len(ranked),
+        "ranked_count": len(ranked),
         "top_scores": [round(s, 4) for s in rank_scores[:10]],
-        "sent_to_scorer": min(50, len(ranked)),
+        "sent_to_scorer": min(_SCORE_TOP_N, len(ranked)),
         "jobs_ranked": ranked_snap,
     }, queue=event_queue)
     logger.info(
-        "[pipeline] run_id=%s rank_done total=%d event_items=%d truncated=%s top_score=%s",
+        "[pipeline] run_id=%s rank_done total=%d top_score=%s",
         run_id,
         len(ranked),
-        len(ranked_snap["items"]),
-        ranked_snap["truncated"],
         round(float(rank_scores[0]), 4) if rank_scores else None,
     )
 
     model = config.SCORING_MODEL
     api_key = config.LLM_API_KEY
-    to_score = ranked[:50]
+    to_score = ranked[:_SCORE_TOP_N]
     prompt_preview = _build_user_prompt(to_score, profile, resume_summary)[:300] if to_score else ""
 
     scored, tokens_used, cost_usd = await score_jobs(
@@ -884,6 +510,7 @@ async def _pipeline_post_scrape(
 
     await _emit(conn, run_id, "score_done", {
         "jobs_scored": len(scored),
+        "scored_count": len(scored),
         "chunks": 1,
         "tokens_used": tokens_used,
         "cost_usd": cost_usd,

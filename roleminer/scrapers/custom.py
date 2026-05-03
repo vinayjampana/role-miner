@@ -315,6 +315,81 @@ def _jobs_from_api_items(items: list[dict], base_url: str, company_name: str) ->
     return jobs
 
 
+def _jobs_from_turbohire_response(
+    data: dict | list, api_url: str, company_name: str, *, careers_page_url: str = ""
+) -> list[Job]:
+    if not isinstance(data, dict):
+        return []
+    results = data.get("Result")
+    if not isinstance(results, list) or not results:
+        return []
+    if not isinstance(results[0], dict) or "JobId" not in results[0]:
+        return []
+
+    org_id = ""
+    first = results[0]
+    org_details = first.get("OrgDetails")
+    if isinstance(org_details, dict):
+        org_id = org_details.get("OrgID", "")
+
+    if careers_page_url and "turbohire.co" in careers_page_url:
+        p = urlparse(careers_page_url)
+        base_careers = f"{p.scheme}://{p.netloc}"
+    else:
+        parsed = urlparse(api_url)
+        base_careers = f"{parsed.scheme}://{parsed.netloc}"
+
+    jobs: list[Job] = []
+    seen: set[str] = set()
+    for item in results:
+        job_id = item.get("JobIdObfuscated") or item.get("JobId", "")
+        if not job_id or job_id in seen:
+            continue
+        seen.add(job_id)
+
+        title = item.get("JobTitle", "")
+        if not title or not _looks_like_job_title(title):
+            continue
+
+        location_raw = item.get("Location", "[]")
+        location = ""
+        try:
+            import json as _json
+            loc_list = _json.loads(location_raw) if isinstance(location_raw, str) else location_raw
+            if isinstance(loc_list, list) and loc_list:
+                addresses = []
+                for loc_item in loc_list:
+                    if isinstance(loc_item, dict):
+                        addresses.append(loc_item.get("Address", ""))
+                    elif isinstance(loc_item, str):
+                        addresses.append(loc_item)
+                location = ", ".join(a for a in addresses if a)
+        except Exception:
+            location = str(location_raw)
+
+        if org_id:
+            job_url = f"{base_careers}/jobdetailsv2/{job_id}?orgId={org_id}"
+        else:
+            job_url = api_url
+
+        work_mode = _detect_work_mode(f"{title} {location}")
+
+        jobs.append(Job(
+            title=_clean_title(title),
+            company=company_name,
+            url=job_url,
+            date_posted=item.get("PublishedDate", ""),
+            location=location,
+            source="custom",
+            work_mode=work_mode,
+            jd_text="",
+        ))
+
+    if jobs:
+        logger.info("[turbohire] parsed %d jobs from %d results", len(jobs), len(results))
+    return jobs
+
+
 async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
     if not careers_url or not careers_url.strip():
         return []
@@ -343,8 +418,12 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
             )
             page = await ctx.new_page()
 
-            # Strategy 0: capture XHR/fetch responses that look like job API calls.
-            # React/Next.js SPAs load jobs via API — intercept before page.goto().
+            _ATS_BACKEND_DOMAINS = [
+                "azurewebsites.net",
+                "turbohire.co",
+            ]
+
+            _captured_api_data: list[tuple[str, dict | list]] = []
             _captured_api_urls: list[str] = []
 
             def _on_response(response):
@@ -354,17 +433,27 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
                 if "json" not in ct:
                     return
                 resp_host = _urlparse(response.url).netloc.lower()
-                # Same company domain only (skip CDNs, analytics, etc.)
-                if not resp_host.endswith(_input_domain):
-                    return
                 resp_url_lower = response.url.lower()
-                # Skip asset/tracking URLs
                 if any(x in resp_url_lower for x in [
                     ".js", ".css", ".map", "/analytics", "/tracking",
                     "/metrics", "/telemetry", "/log", "/pixel",
+                    "/token/", "/verifieddomains", "/policydetails",
+                    "/publicorganizations", "/clientele", "/departments",
                 ]):
                     return
+                allowed = (
+                    resp_host.endswith(_input_domain)
+                    or any(resp_host.endswith(d) for d in _ATS_BACKEND_DOMAINS)
+                )
+                if not allowed:
+                    return
                 _captured_api_urls.append(response.url)
+                try:
+                    import asyncio as _aio
+                    task = _aio.ensure_future(response.json())
+                    _captured_api_data.append((response.url, task))
+                except Exception:
+                    pass
 
             page.on("response", _on_response)
 
@@ -384,7 +473,30 @@ async def scrape(careers_url: str, company_name: str = "") -> list[Job]:
                 final_url, len(_captured_api_urls),
             )
 
-            # Try intercepted API responses first (most reliable for SPAs)
+            if _captured_api_data:
+                for api_url, task in _captured_api_data:
+                    try:
+                        data = await task
+                        jobs = _jobs_from_turbohire_response(data, api_url, company_name, careers_page_url=url)
+                        if jobs:
+                            logger.info(
+                                "[custom-scrape] %d jobs via response-capture api_url=%s",
+                                len(jobs), api_url,
+                            )
+                            return jobs
+                        items = _extract_job_items(data)
+                        if not items:
+                            continue
+                        jobs = _jobs_from_api_items(items, api_url, company_name)
+                        if jobs:
+                            logger.info(
+                                "[custom-scrape] %d jobs via response-capture api_url=%s",
+                                len(jobs), api_url,
+                            )
+                            return jobs
+                    except Exception as exc:
+                        logger.debug("[custom-scrape] response-capture failed %s: %s", api_url, exc)
+
             if _captured_api_urls:
                 for api_url in _captured_api_urls:
                     try:

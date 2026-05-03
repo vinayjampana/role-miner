@@ -49,12 +49,19 @@ def workday_human_to_cxs(url: str) -> str | None:
     return f"https://{tenant}.{instance}.myworkdayjobs.com/wday/cxs/{tenant}/{board}/jobs"
 
 
+_TURBOHIRE = re.compile(
+    r"https?://([a-z0-9-]+)\.turbohire\.co/",
+    re.IGNORECASE,
+)
+
+
 def detect_ats_from_url(url: str | None) -> tuple[str, str] | None:
     """
     Return (ats_type, ats_slug) if the URL is a supported ATS.
 
     Slug is the board/team id for Greenhouse, Lever, and Ashby. Workday uses
     careers_url for scraping; slug is always "" when ats_type is workday.
+    TurboHire uses custom scraper via careers_url; slug is always "".
     """
     if not url or not str(url).strip():
         return None
@@ -87,12 +94,14 @@ def detect_ats_from_url(url: str | None) -> tuple[str, str] | None:
         if slug:
             return ("smartrecruiters", slug)
 
+    m = _TURBOHIRE.search(u)
+    if m:
+        return ("turbohire", "")
+
     u_lower = u.lower()
     if "myworkdayjobs.com" in u_lower:
-        # CXS API endpoint
         if "/wday/cxs/" in u:
             return ("workday", "")
-        # Human-facing board URL — recognise but don't convert here
         if _WORKDAY_HUMAN.search(u):
             return ("workday", "")
 

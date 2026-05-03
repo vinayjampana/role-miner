@@ -980,6 +980,24 @@ def update_company_embedding_id(conn: sqlite3.Connection, company_id: int, embed
     conn.commit()
 
 
+def get_freshness_by_name(conn: sqlite3.Connection, name: str) -> str | None:
+    """Return last_scraped_at for a company by name, or None if not found."""
+    row = conn.execute(
+        "SELECT last_scraped_at FROM companies WHERE name = ?", (name,)
+    ).fetchone()
+    return row["last_scraped_at"] if row else None
+
+
+def set_freshness_by_name(conn: sqlite3.Connection, name: str) -> None:
+    """Record last_scraped_at=now for a company by name (upsert stub row if needed)."""
+    now = datetime.now(tz=timezone.utc).isoformat()
+    conn.execute("INSERT OR IGNORE INTO companies (name) VALUES (?)", (name,))
+    conn.execute(
+        "UPDATE companies SET last_scraped_at = ? WHERE name = ?", (now, name)
+    )
+    conn.commit()
+
+
 def delete_company(conn: sqlite3.Connection, company_id: int) -> None:
     """Delete a company by id."""
     conn.execute("DELETE FROM companies WHERE id = ?", (company_id,))

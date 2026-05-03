@@ -1,115 +1,81 @@
 # RoleMiner
 
-Personal job discovery tool for senior engineering roles in India. Scrapes multiple sources, scores against your profile, surfaces a ranked shortlist via CLI or React dashboard.
+Personal job discovery tool for senior engineering roles in India. Scrapes Greenhouse and Workday, scores against your profile, surfaces a ranked shortlist via CLI or React dashboard.
 
-**Deep dive / agent context** — Task-oriented map of the repo (what to read for scrapers, API, pipeline, debugging): [docs/llm/INDEX.md](docs/llm/INDEX.md).
+**Agent / LLM context** — task-oriented doc map: [docs/llm/INDEX.md](docs/llm/INDEX.md)
 
-## Recent updates (since last release commit)
+---
 
-- **Persisted scrape strategies (custom / `custom_api`)**: Registry companies can store JSON **`scrape_strategy`** plus **`strategy_status`** (typically **`active`**, **`stale`** when a strategy run returns HTTP OK but zero jobs, or **`failed`** from orchestration errors). After each successful row in **`POST /companies/discover`** (SSE `result` event), the server may **sniff** the careers page (`network_sniffer`) and **ask the LLM** for a structured strategy (`strategy_builder`), then **`upsert_company`**; the stream emits optional **`strategy`** events (`active` / `failed`). On **`python main.py run`**, **`_scrape_company`** tries **`scrapers/dynamic`** first when a strategy is **active**; if the page returns HTTP OK but **zero jobs**, the strategy is marked **`stale`** so the next run falls back to the usual custom / `custom_api` path. **`discovery_agent`** holds reusable “discover strategy for one company” helpers.
+## Current State (V1)
 
-- **Custom scraper — SPA network intercept**: Playwright now intercepts XHR/fetch responses during page load (Strategy 0) to capture job API calls from React/Next.js career pages (e.g. Upstox). Captures same-domain JSON responses, replays via `page.request`, parses with `_extract_job_items`. Runs before DOM strategies.
-- **Custom scraper — redirect discovery**: When 0 jobs scraped, `find_redirect_via_cta` uses Playwright to find the real job portal URL — Phase 1 scans `<a href>` links by CTA text or known portal domain (`_JOB_PORTAL_RE`); Phase 2 clicks buttons and captures popup/navigation URL. Updates `careers_url` in DB for future runs. Handles pages like `whatfix.com/careers` → `whatfix101.hire.trakstar.com`.
-- **browser_detect Signal 5**: Extends `detect_ats_with_browser` to capture hrefs to 20+ unsupported job portals (trakstar, workable, breezy, recruitee, iCIMS, Taleo, BambooHR, teamtailor, Keka, Darwinbox, etc.) even when no known ATS is detected. Updates `careers_url` in DB so next scrape targets the real listing page.
-- **`_looks_like_job_title` rewrite**: Whole-word regex (`_JOB_KEYWORD_RE`) instead of substring matching — fixes false positives like "productivity" → "product", "Managers" → "manager", "analytics" → "analyst". Adds word-count cap (> 10 words rejected), `_MARKETING_RE` (kills testimonials/CTAs), `_CONTENT_SUFFIX_RE` (kills "Analyst Reports", "Developer Hub"). Tested against 27 pass/fail cases.
-- **`_walk_json_for_jobs` fix**: Now applies `_looks_like_job_title` before emitting a job from Next.js page metadata — stops page titles like "Home", "Whatfix" from becoming job entries.
-- **LLM scrape validation**: `validate_custom_scrape()` in `scorer.py` — cheap LLM call (≤80 tokens, uses `DISCOVER_MODEL` free tier) after custom Playwright scrape; detects nav/marketing garbage that slips past rules; fails open (valid=True) on API error.
-- **Custom career sites**: Playwright-based DOM scraper with pagination; **proprietary JSON APIs** discovered from JS bundles (`custom_api` ATS type), including split-bundle heuristics (e.g. Cars24 via `careers.{domain}` fallback and `*.team` API hosts). `job_api_discover` module; Docker image installs Playwright browsers.
-- **SmartRecruiters**: New scraper + ATS detection; **Freshworks** seed uses `https://careers.smartrecruiters.com/Freshworks`.
-- **Resolve / detect**: JS chunk scan for embedded ATS URLs; **Playwright fallback** (`browser_detect`) when static HTML has no board URL; Workday human URLs normalized to CXS where applicable.
-- **Registry seed**: **Darwinbox** added (`custom`, Darwinbox careers URL); **Razorpay** and other seed fixes as in `db.py`.
-- **Run logs**: New **`dedup_done`** event; rule filter, role filter, rank, and score events include **capped job snapshots** (title, company, URL; rank/score where relevant). Structured **`logger.info`** summaries per step. RunLogs UI: **Dedup** pipeline step, expandable job tables, live SSE merges so snapshots update before refetch; stream lines show truncation hints.
-- **API**: `POST /companies/{company_id}/scrape` runs scrape + post-scrape pipeline for one registry company (background task + run_events / SSE like full runs).
-- **Tests**: `test_cars24_custom_api`, `test_smartrecruiters`, `test_custom_scrape_debug`, expanded ATS detect coverage (~110+ phase1 tests).
+**Active scrapers:** Greenhouse · Workday (HTTP-first, Playwright fallback on empty)
 
-## What it does
+**Company registry:** static file at `roleminer/registry/data/companies.json` — edit this file to add or remove companies. No dynamic discovery in V1.
 
+**Disabled (code kept, not called):**
+- Lever / Ashby / Cutshort / SmartRecruiters scrapers
+- Custom career portal scraping (Playwright-first path)
+- ATS auto-detection from HTML/JS
+- Career URL auto-discovery (4-step: cache → heuristics → Brave → LLM)
+- Company auto-registration from scraped job URLs
+
+**Pipeline:**
 ```
-resume_summary + search_profile.yaml
-  → scrape: Greenhouse · Lever · Ashby · Cutshort · Workday · SmartRecruiters · custom / custom_api
-     (custom / custom_api: optional dynamic path first if `scrape_strategy` is active in DB)
-  → skip companies scraped within 24h (freshness cache)
-  → dedup by URL (logged as dedup_done with job snapshot in run_events)
-  → auto-discover new companies from scraped job URLs
-  → filter: freshness (30d) · location · salary LPA · product-only · blocklist
-  → role filter: drop DS/DevOps/mobile/PM titles
-  → embed all filtered jobs → ChromaDB (nvidia/llama-nemotron-embed-vl-1b-v2:free)
+search_profile.yaml
+  → load companies from registry/data/companies.json (Greenhouse + Workday only)
+  → skip companies scraped within SCRAPER_FRESHNESS_HOURS (default 24h)
+  → HTTP scrape → Playwright fallback if zero jobs
+  → fuzzy dedup (URL + normalized title/company/location)
+  → filter: age (30d) · location · salary LPA · company type · blocklist
+  → role filter: drop DS / DevOps / mobile / PM titles
+  → embed → ChromaDB (nvidia/llama-nemotron-embed-vl-1b-v2:free)
   → semantic rank (embeddings) or TF-IDF fallback
-  → top 50 → ONE LLM call → score 0–10 + skill gap
+  → top 20 → ONE LLM call → score 0–10 + skill gap
   → output/scored_jobs_TIMESTAMP.json
-  → React app (Dashboard · Tracker · RunLogs · Companies · Settings)
+  → React UI: Dashboard · Tracker · RunLogs · Companies · Settings
 ```
 
 **Cost per run: < $0.002 (~₹0.17)**
 
+---
+
 ## Setup
+
+### 1. Clone and install
 
 ```bash
 git clone <repo>
 cd role-miner
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Edit search_profile.yaml to match your profile
 ```
 
-Create `.env` (gitignored):
-```
-# LLM for scoring (OpenRouter recommended)
+### 2. Configure environment
+
+Create `.env` in the project root (gitignored):
+
+```env
+# LLM for scoring — any OpenAI-compatible API
 LLM_API_KEY=sk-or-v1-...
 LLM_BASE_URL=https://openrouter.ai/api/v1
 SCORING_MODEL=deepseek/deepseek-chat-v3-0324:free
 
-# Embeddings (same OpenRouter key works — model is free)
+# Embeddings (OpenRouter free model)
 EMBED_API_KEY=sk-or-v1-...          # defaults to LLM_API_KEY if unset
 EMBED_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free
 
-# Company career URL discovery
-DISCOVER_MODEL=tencent/hy3-preview:free
-BRAVE_SEARCH_API_KEY=...            # optional — enables web search step
-
-# Scraper freshness (skip companies scraped within this window)
-SCRAPER_FRESHNESS_HOURS=24          # default 24h
+# Scraper freshness — skip companies scraped within this window
+SCRAPER_FRESHNESS_HOURS=24
 ```
 
-## Usage
+`DISCOVER_MODEL` and `BRAVE_SEARCH_API_KEY` are unused in V1 but can be set for future use.
 
-### CLI
-
-```bash
-# Seed company registry (run once)
-python main.py bootstrap
-
-# Run full pipeline
-python main.py run
-# → output/scored_jobs_20260501T143022Z.json
-
-# Start API server
-python main.py serve   # http://localhost:8000
-
-# Clear scraper freshness so the next run re-scrapes every company
-python main.py reset-scrape
-```
-
-Subcommands are explicit: `bootstrap | run | serve | reset-scrape` (no default).
-
-### Full stack (API + React)
-
-```bash
-# Docker Compose: API on :8000, frontend on :3000
-docker compose up
-
-# Or dev mode
-python main.py serve &
-cd frontend && npm run dev   # proxies /api → :8000
-```
-
-## Configuration
+### 3. Edit your profile
 
 Edit `search_profile.yaml`:
 
 ```yaml
-skills: [React, TypeScript, Node.js, Python]
+skills: [Python, Go, TypeScript, Kubernetes]
 locations: [Bangalore, Hyderabad, Remote]
 salary_min_lpa: 30
 work_mode: [remote, hybrid]
@@ -117,165 +83,207 @@ company_type: [product]
 exclude_companies: []
 notice_days: 60
 resume_summary: |
-  Senior full-stack engineer, 8+ years, ...
+  Senior backend engineer, 8+ years, distributed systems, ...
 ```
+
+### 4. Add companies to scrape
+
+Edit `roleminer/registry/data/companies.json`. Add any Greenhouse or Workday company:
+
+```json
+[
+  {
+    "company": "Razorpay",
+    "ats": "greenhouse",
+    "slug": "razorpaysoftwareprivatelimited",
+    "careers_url": "https://boards.greenhouse.io/razorpaysoftwareprivatelimited"
+  },
+  {
+    "company": "PayPal",
+    "ats": "workday",
+    "careers_url": "https://paypal.wd1.myworkdayjobs.com/wday/cxs/paypal/jobs/jobs"
+  }
+]
+```
+
+**Greenhouse:** find the slug from `https://boards.greenhouse.io/{slug}` — the company's public job board URL.
+
+**Workday:** use the `/wday/cxs/{tenant}/{board}/jobs` endpoint. Find it by opening DevTools on the company's Workday careers page and looking for POST requests to `myworkdayjobs.com`.
+
+---
+
+## Run
+
+### CLI
+
+```bash
+# Embed companies into ChromaDB (run once after adding companies)
+python main.py bootstrap
+
+# Full pipeline: scrape → filter → rank → score
+python main.py run
+# Output: output/scored_jobs_20260501T143022Z.json
+
+# Start API server (no scrape on start)
+python main.py serve   # http://localhost:8000
+
+# Force re-scrape all companies (clear freshness cache)
+python main.py reset-scrape
+```
+
+### Full stack (API + React UI)
+
+```bash
+# Docker Compose — API on :8000, frontend on :3000
+docker compose up
+
+# Dev mode
+python main.py serve &
+cd frontend && npm run dev   # proxies /api → :8000
+```
+
+---
+
+## Companies included (V1)
+
+| Company | ATS | Notes |
+|---|---|---|
+| Razorpay | Greenhouse | slug: razorpaysoftwareprivatelimited |
+| Groww | Greenhouse | slug: groww |
+| Postman | Greenhouse | slug: postman |
+| Slice | Greenhouse | slug: slice |
+| PhonePe | Greenhouse | slug: phonepe |
+| BrowserStack | Workday | wd3 tenant |
+| PayPal | Workday | wd1 tenant |
+| Adobe | Workday | wd5 tenant |
+| Walmart Global Tech | Workday | wd5 tenant |
+
+To add more: edit `roleminer/registry/data/companies.json`.
+
+---
 
 ## API
 
-All routes are under the app root (e.g. `/jobs/latest`). The API uses a lightweight **user** row in SQLite: send **`X-User-Id: <id>`** to act as that user, or omit it / send `0` to use the default user created on first use.
+Send `X-User-Id: <id>` header to act as a specific user, or omit it to use the default user (created on first `init_db`).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/jobs/latest` | Jobs across **all completed runs** for the **active search profile**, deduped by URL, **best score per URL**; query `min_score` (default **6**) |
-| GET | `/jobs/run/{id}` | Jobs for one run (must belong to the user) |
-| GET | `/jobs/tracked` | Jobs with any non-new tracker status |
-| POST | `/jobs/status` | Set tracker status + notes (`url`, `status`, `notes`) — e.g. `saved`, `archived`, `applied`, `clicked` |
-| POST | `/jobs/click` | Mark job as `clicked` when opening apply link (if still `new`) |
+| GET | `/jobs/latest` | All completed runs for active profile, deduped by URL, best score per URL; `min_score` default 6 |
+| GET | `/jobs/run/{id}` | Jobs for one run |
+| GET | `/jobs/tracked` | Jobs with non-new tracker status |
+| POST | `/jobs/status` | Set tracker status (`saved`, `applied`, `archived`, etc.) |
+| POST | `/jobs/click` | Mark job clicked (promote `new` → `clicked`) |
 | GET | `/runs` | Run history (last 20) |
-| GET | `/runs/{id}` | Run detail with all pipeline events |
-| POST | `/trigger` | Start a new pipeline run, returns `run_id` |
-| GET | `/stream/{run_id}` | SSE: live pipeline events (or replay from DB) |
-| GET | `/stats` | Aggregate totals + per-source job counts |
-| GET | `/companies` | All companies in registry (`CompanyOut` includes `scrape_strategy`, `strategy_status` when present) |
-| PATCH | `/companies/{id}` | Partial update: `careers_url` and/or `ats_type` (empty string clears; `ats_type` must be a known scraper or empty) |
-| POST | `/companies/discover` | Discover career URLs for company names (**SSE**): `result` per company, optional **`strategy`** after sniff + LLM for **custom** / **custom_api**, then `done` |
-| POST | `/companies/{id}/scrape` | Scrape one registry company and run filter → embed → rank → score (returns `run_id`) |
-| GET | `/users` | List users |
-| POST | `/users` | Create user |
-| GET | `/me` | Current user (from `X-User-Id`) + active profile |
-| GET | `/profile` | Active search profile (YAML-backed) |
-| PUT | `/profile` | Update active profile |
-| GET | `/profile/resume` | Resume metadata |
-| POST | `/profile/resume` | Upload resume |
-| GET | `/settings` | Runtime settings |
-| PUT | `/settings` | Update runtime settings |
+| GET | `/runs/{id}` | Run detail + all pipeline events |
+| POST | `/trigger` | Start new pipeline run, returns `run_id` |
+| GET | `/stream/{run_id}` | SSE: live pipeline events |
+| GET | `/stats` | Totals + per-source job counts |
+| GET | `/companies` | Companies in registry |
+| GET | `/me` | Current user + active profile |
+| GET/PUT | `/profile` | Active search profile |
+| POST | `/profile/resume` | Upload resume PDF |
+| GET/PUT | `/settings` | Runtime settings |
 
-## Frontend views
+---
 
-**Dashboard** — job grid for the active profile: **min score** (default 6, API-aligned), work mode, company type, ESOP / notice filters, optional **hide archived / dismissed**. Cards: score badge, skill match vs gap, **Apply** (records **clicked** when first opened), **Save for later**, **Archive**, **Mark applied**. Detail drawer has full tracker dropdown + notes.
+## Frontend
 
-**Tracker** — grouped board for jobs you have marked (saved, archived, applied, clicked, etc.) with readable section titles.
+**Dashboard** — job grid: score filter (default ≥ 6), work mode, company type, ESOP/notice filters. Cards: score badge, skill match/gap, Apply (logs click), Save, Archive, Mark Applied. Detail drawer with tracker dropdown + notes.
 
-**RunLogs** — per-run pipeline breakdown:
-- Pipeline step tracker: Scrape → **Dedup** → Filter → Role → Embed → Rank → Score with live status badges
-- Scraper table: all companies with per-company status (pending / scraping… / ✓ / ⏭ fresh / error)
-- Company discovery: new companies found via ATS URL detection each run
-- **Dedup**: unique job count after URL deduplication + expandable table of jobs in the log (capped)
-- Filter drop chart: stale / location / salary / company_type / blocklist; **jobs passing rule filter** (table)
-- Role filter: how many dropped + samples; **jobs passing role filter** (table)
-- Embedding: jobs embedded count + model name
-- Ranker: top similarity scores; **ranked jobs** table (similarity + links)
-- Scorer: jobs scored · tokens · cost · score distribution chart · top 5 jobs · **all scored jobs table** · LLM prompt preview
-- Errors panel: real-time error display with traceback (shown as soon as any error arrives)
-- Live events terminal with timestamps via SSE; replays from DB for finished runs
+**Tracker** — board grouped by status (saved, applied, interviewing, etc.).
 
-**Companies** — registry browser with search + ATS filter. **Discover panel** (`+ Discover` button): paste company names, resolves career URLs via 4-step flow (cache → URL heuristics → Brave Search → LLM), streams **`result`** events per company, auto-adds to DB; for **custom** / **custom_api** careers the same stream may emit **`strategy`** (saved strategy type or failure), which feeds the **dynamic** scrape path on later runs.
+**RunLogs** — per-run pipeline breakdown: scraper table, dedup count, filter drop chart, role filter, embed, ranker scores, scorer results + cost. Live SSE during active runs.
 
-**Settings** — user switcher (`X-User-Id`), resume upload, profile editor tied to the pipeline.
+**Companies** — registry browser. Edit `careers_url` and `ats_type` inline.
 
-## Company discovery flow
+**Settings** — user switcher, resume upload, profile editor.
 
-```
-Company name
-  → Step 1: DB cache (careers_url or ats_slug already known)
-  → Step 2: URL heuristics (probe {name}.com/careers, /jobs, careers.{name}.com)
-  → Step 3: Brave Search API (if BRAVE_SEARCH_API_KEY set)
-  → Step 4: LLM batch (tencent/hy3-preview:free via OpenRouter)
-  → save to registry + stream result to UI (SSE `result`)
-  → if ATS is custom or custom_api: optional Playwright sniff + LLM strategy → DB + SSE `strategy`
-```
+---
 
-## ChromaDB vector store
+## Future roadmap
 
-Two persistent collections (default path under `roleminer/registry/chroma/`):
+| Feature | Status |
+|---|---|
+| Lever + Ashby scrapers | Code exists, disabled — re-enable in `main.py` |
+| Cutshort scraper | Code exists, disabled |
+| SmartRecruiters scraper | Code exists, disabled |
+| Custom career portal scraping (Playwright) | Code exists (`scrapers/custom.py`), disabled as primary path |
+| ATS auto-detection from HTML | Code exists (`registry/ats_detect.py`), disabled |
+| Career URL auto-discovery (4-step) | Code exists (`registry/career_finder.py`), disabled |
+| Company auto-registration from job URLs | Code exists in pipeline, disabled |
+| Wellfound / YC / iimjobs / Naukri | Not yet built |
+| Dynamic scrape strategies (LLM-built JSON) | Code exists (`registry/strategy_builder.py`), disabled |
+| Per-company scrape concurrency | Not yet built |
 
-| Collection | Populated | Use |
-|---|---|---|
-| `companies` | On bootstrap | Semantic company similarity search |
-| `jobs` | Every run (all filter-passing jobs) | Cross-run semantic job search |
+---
 
 ## Stack
 
-- **Scraping**: HTTPX + tenacity retry; **Playwright** for custom career pages and ATS browser-detect fallback
-- **ATS support**: Greenhouse · Lever · Ashby · Cutshort · Workday · **SmartRecruiters** · **custom** (Playwright) · **custom_api** (discovered JSON endpoints); listings may be fetched via **`scrapers/dynamic`** when a persisted JSON **strategy** is **active** (still stored as custom / `custom_api` in the registry)
-- **Storage**: SQLite (companies + runs + run_events) + ChromaDB (embeddings)
-- **Pipeline**: rule filter → role filter → embed → semantic rank → single LLM score call
-- **Embeddings**: `nvidia/llama-nemotron-embed-vl-1b-v2:free` via OpenRouter
+- **Python 3.11+** · FastAPI · SQLite · ChromaDB · HTTPX · Playwright (fallback only)
+- **React 18** · Vite · TypeScript · React Query · Recharts · Tailwind
+- **Docker Compose** for local + VPS deploy
 - **LLM**: any OpenAI-compatible API via `LLM_API_KEY` + `LLM_BASE_URL`
-- **API**: FastAPI + SSE (sse-starlette)
-- **Frontend**: React 18 + Vite + TypeScript + Tailwind + React Query + Recharts
+- **Embeddings**: `nvidia/llama-nemotron-embed-vl-1b-v2:free` via OpenRouter
+
+---
 
 ## Project structure
 
 ```
-main.py                    # CLI: bootstrap | run | serve | reset-scrape
-config.py                  # paths, env vars, model config
-search_profile.yaml        # your job preferences
-Dockerfile
-docker-compose.yml
+main.py                          # CLI: bootstrap | run | serve | reset-scrape
+config.py                        # env vars + paths
+search_profile.yaml              # your job preferences
 roleminer/
-├── scrapers/              # greenhouse · lever · ashby · cutshort · workday · smartrecruiters · custom · dynamic
+├── scrapers/
+│   ├── greenhouse.py            # Greenhouse public JSON API
+│   ├── workday.py               # Workday CXS JSON API
+│   ├── base.py                  # Job dataclass · dedup_by_url · dedup_fuzzy
+│   ├── custom.py                # Playwright custom portal (disabled as primary; used as fallback)
+│   └── ...                      # lever, ashby, cutshort, smartrecruiters (disabled)
 ├── registry/
-│   ├── db.py              # SQLite CRUD (companies incl. scrape_strategy, runs, run_events, users, profiles, job_status)
-│   ├── vector_store.py    # ChromaDB collections (companies + jobs)
-│   ├── ats_detect.py      # ATS URL detection + embedded career links
-│   ├── job_api_discover.py # scan JS bundles for proprietary job-list APIs
-│   ├── browser_detect.py  # Playwright ATS detection fallback
-│   ├── network_sniffer.py # Playwright capture for strategy discovery (XHR/HTML)
-│   ├── strategy_builder.py # LLM → structured ScrapeStrategy JSON
-│   ├── discovery_agent.py # orchestrate sniff + strategy persist per company
-│   ├── chroma/            # default Chroma persistence directory
-│   └── career_finder.py   # 4-step company career URL discovery
+│   ├── data/
+│   │   └── companies.json       # STATIC REGISTRY — edit this to add companies
+│   ├── static_registry.py       # load_companies() — reads companies.json
+│   ├── db.py                    # SQLite: runs, run_events, jobs, users, profiles, job_status
+│   ├── vector_store.py          # ChromaDB collections (companies + jobs)
+│   ├── ats_detect.py            # ATS URL detection (disabled in V1)
+│   ├── browser_detect.py        # Playwright ATS detection (disabled in V1)
+│   ├── career_finder.py         # 4-step career URL discovery (disabled in V1)
+│   └── ...                      # job_api_discover, network_sniffer, strategy_builder (disabled)
 ├── pipeline/
-│   ├── embedder.py        # OpenRouter embedding client
-│   ├── ranker.py          # semantic rank (embeddings) or TF-IDF fallback
-│   ├── filter.py
-│   ├── role_filter.py
-│   └── scorer.py
-└── api/                   # FastAPI routes + SSE + auth header
-    ├── auth.py            # X-User-Id → CurrentUser
-    └── routes/            # jobs, users, preferences, companies, runs, stream, stats
-frontend/
-└── src/
-    ├── views/             # Dashboard · Tracker · RunLogs · Companies · Settings
-    ├── auth/              # user context for API client
-    ├── components/        # JobCard · JobDetail · RunEventStream
-    ├── lib/datetime.ts    # IST formatting helpers
-    └── api/client.ts      # typed API client
-docs/
-└── llm/                   # INDEX + module maps for agents / large-context tooling (see link above)
-tests/
-└── phase1/                # 110+ tests, all green
+│   ├── embedder.py              # OpenRouter embedding client
+│   ├── ranker.py                # semantic rank or TF-IDF fallback
+│   ├── filter.py                # rule-based filter
+│   ├── role_filter.py           # title-based role filter
+│   └── scorer.py                # single LLM call, top-20 jobs
+└── api/
+    ├── main.py                  # FastAPI app + startup cleanup
+    ├── auth.py                  # X-User-Id → CurrentUser
+    └── routes/                  # jobs · runs · stream · companies · users · preferences · stats
+frontend/src/
+├── views/                       # Dashboard · Tracker · RunLogs · Companies · Settings
+├── components/                  # JobCard · JobDetail · RunEventStream
+└── api/client.ts                # typed API client
 ```
 
-## Build phases
+---
 
-| Phase | Status | What |
-|-------|--------|------|
-| 1 | ✅ Done | Greenhouse · Lever · Ashby · Cutshort · SmartRecruiters + custom scrapers + filter + LLM scorer (110+ tests) |
-| 2 | ✅ Done | Workday scraper · TF-IDF ranker · role filter · expanded seed companies |
-| 3 | ✅ Done | Docker Compose · run_events DB · structured pipeline event logging |
-| 4 | ✅ Done | FastAPI + SSE + React Dashboard + RunLogs with live stream |
-| 5 | ✅ Done | ChromaDB embeddings · semantic ranker · company auto-discovery · career URL finder · RunLogs redesign |
-| Remaining | Planned | Wellfound · YC · iimjobs · Naukri scrapers |
+## Key constraints
+
+- Salary always in LPA — never USD internally
+- Never stores full JDs — metadata only; JDs fetched fresh each run
+- Service company filter is rule-based, not LLM
+- Single LLM call per run — batches top **20** jobs
+- LLM provider agnostic — set `LLM_API_KEY` + `LLM_BASE_URL`
+- Scraper freshness: companies scraped within `SCRAPER_FRESHNESS_HOURS` (default 24h) are skipped
+- Stale "running" runs auto-cleaned to "failed" on server startup
+- Job shortlist is per active profile: all completed runs merged, best score per URL, default `min_score=6`
+
+---
 
 ## Tests
 
 ```bash
 pytest tests/phase1/ -v
-# 110+ passed (includes live HTTP probes where safe)
+# 110+ tests (live HTTP probes for Greenhouse/Lever/Ashby; LLM calls mocked)
 ```
-
-Live HTTP tests hit real public APIs (Greenhouse/Lever/Ashby). LLM calls are mocked.
-
-## Key constraints
-
-- Salary always in LPA — never USD internally
-- Never stores full JDs — company metadata only, JDs fetched fresh each run
-- Service company filter is rule-based (fast), not LLM
-- Single LLM call per run — batches top 50 jobs in 15-job chunks
-- LLM provider agnostic: set `LLM_API_KEY` + `LLM_BASE_URL` for any OpenAI-compatible API
-- Scraper freshness: companies scraped within `SCRAPER_FRESHNESS_HOURS` (default 24h) are skipped
-- Stale "running" runs auto-cleaned to "failed" on server startup
-- **Job shortlist** is per **active profile**: all completed runs for that profile are merged; each URL keeps its **best** score; dashboard defaults to **score ≥ 6**
-- **Custom / `custom_api` strategies**: optional LLM-built scrape strategy in SQLite; not a second scoring pass — only affects how listings are fetched before the normal filter → rank → **single** score batch
